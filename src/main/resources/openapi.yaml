@@ -395,6 +395,11 @@ paths:
     post:
       tags: [Simulations]
       summary: Start a custom (explicit graph) simulation
+      description: >
+        Accepts two content types. Use `application/json` for networks with fewer than 1000
+        agents. For larger networks, send `application/octet-stream` with the binary
+        little-endian payload (same format as the legacy `POST /custom` endpoint) to avoid
+        serializing a large JSON body.
       requestBody:
         required: true
         content:
@@ -428,6 +433,14 @@ paths:
                   target: A
                   influence: 0.5
                   bias: 0
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+            description: >
+              Binary payload (little-endian). Recommended for networks with 1000 or more
+              agents. Format is identical to the legacy `POST /custom` binary protocol
+              (see that endpoint for the byte layout reference).
       responses:
         '200':
           description: Run started

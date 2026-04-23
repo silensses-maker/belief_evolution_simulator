@@ -255,7 +255,7 @@ object Server {
                             optionalHeaderValueByName("X-Forwarded-For") { xff =>
                                 logLegacy("/custom", ua, xff)
                                 entity(as[Payload]) { payload =>
-                                    val channelId = parseCustomRun(payload.data)
+                                    val (_, channelId) = parseCustomRun(payload.data)
                                     complete(channelId)
                                 }
                             }
@@ -269,7 +269,7 @@ object Server {
                             optionalHeaderValueByName("X-Forwarded-For") { xff =>
                                 logLegacy("/neighbors", ua, xff)
                                 entity(as[Payload]) { payload =>
-                                    val channelId = parseCustomRun(payload.data)
+                                    val (_, channelId) = parseCustomRun(payload.data)
                                     complete(channelId)
                                 }
                             }
@@ -431,11 +431,9 @@ object Server {
                             extractRequest { req =>
                                 val ct = req.entity.contentType.mediaType.toString
                                 if (ct.contains("octet-stream")) {
-                                    // Binary path — reuse existing parser
                                     entity(as[Payload]) { payload =>
-                                        val channelId = parseCustomRun(payload.data, Some(authUser.dbUserId))
-                                        // For binary path we don't easily get runId back, return channelId only
-                                        complete(jsonOk(s"""{"channelId":"$channelId"}"""))
+                                        val (runId, channelId) = parseCustomRun(payload.data, Some(authUser.dbUserId))
+                                        complete(jsonOk(simCreatedJson(runId, 1, channelId, authUser.uid)))
                                     }
                                 } else {
                                     entity(as[CustomRunReq]) { runReq =>
@@ -981,7 +979,7 @@ object Server {
         channelId
     }
     
-    private def parseCustomRun(data: Array[Byte], userId: Option[Int] = None): String = {
+    private def parseCustomRun(data: Array[Byte], userId: Option[Int] = None): (Long, String) = {
         // Header
         val stopThreshold = bytesToFloat(data, 0)
         val iterationLimit = bytesToInt(data, 4)
@@ -1146,7 +1144,7 @@ object Server {
         
         monitor.get ! RunCustomNetwork(customRunInfo)
 
-        channelId
+        (runID, channelId)
     }
 
     private def executeCustomRunFromJson(req: CustomRunReq, userId: Option[Int]): (Long, String) = {
