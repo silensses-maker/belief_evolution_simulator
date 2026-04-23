@@ -1,0 +1,949 @@
+openapi: 3.0.3
+info:
+  title: Belief Evolution Simulator API
+  version: 1.0.0
+  description: |
+    REST + WebSocket API for the Belief Evolution Simulator.
+
+    All protected endpoints require `Authorization: Bearer <Firebase idToken>`.
+
+    **Save modes:** `0` = FULL (persists to DB), `1` = PARTIAL, `2` = DEBUG (no DB writes — use in dev).
+
+    **Silence strategies:** `0` = DEFAULT, `1` = MAJORITY, `2` = CONFIDENCE
+
+    **Silence effects:** `0` = DEFAULT, `1` = NONE
+
+    **Cognitive biases:** `0` = NONE, `1` = CONFIRMATION, `2` = BACKFIRE, `3` = AUTHORITY
+
+servers:
+  - url: http://localhost:9000
+    description: Local development
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Firebase idToken
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          example: forbidden
+        message:
+          type: string
+          example: Admin role required
+
+    UsageLimits:
+      type: object
+      properties:
+        maxAgents:
+          type: integer
+          nullable: true
+        maxIterations:
+          type: integer
+          nullable: true
+        densityFactor:
+          type: number
+          format: float
+
+    UserInfo:
+      type: object
+      properties:
+        uid:
+          type: string
+        email:
+          type: string
+        name:
+          type: string
+        photo:
+          type: string
+          nullable: true
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [Administrator, Researcher, BaseUser, Guest]
+        usageLimits:
+          $ref: '#/components/schemas/UsageLimits'
+        deactivated:
+          type: boolean
+
+    RunSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Snowflake ID (64-bit, returned as string)
+        type:
+          type: string
+          enum: [generated, custom]
+        name:
+          type: string
+          nullable: true
+        networkCount:
+          type: integer
+        iterationLimit:
+          type: integer
+        stopThreshold:
+          type: number
+          format: float
+        createdAt:
+          type: string
+          format: date-time
+
+    SimCreated:
+      type: object
+      properties:
+        runId:
+          type: string
+          description: Snowflake ID
+        status:
+          type: string
+          enum: [running]
+        networkCount:
+          type: integer
+        channelId:
+          type: string
+        wsTicket:
+          type: string
+          description: Single-use ticket for WS connection (30s TTL)
+        wsUrl:
+          type: string
+
+    AgentType:
+      type: object
+      required: [silenceStrategy, silenceEffect, count]
+      properties:
+        silenceStrategy:
+          type: integer
+        silenceEffect:
+          type: integer
+        count:
+          type: integer
+          description: Number of agents of this type
+
+    BiasType:
+      type: object
+      required: [biasType, count]
+      properties:
+        biasType:
+          type: integer
+        count:
+          type: integer
+          description: |
+            Total number of EDGES in the network (not agents).
+            Formula: density*(density-1) + (numberOfAgents - density) * 2*density
+
+    GeneratedRunRequest:
+      type: object
+      required: [numberOfNetworks, density, iterationLimit, stopThreshold, saveMode, agentTypes, biasTypes]
+      properties:
+        numberOfNetworks:
+          type: integer
+          minimum: 1
+        density:
+          type: integer
+          minimum: 2
+          description: Barabási–Albert m parameter (edges added per new node)
+        iterationLimit:
+          type: integer
+        stopThreshold:
+          type: number
+          format: float
+          description: Convergence threshold (e.g. 0.001)
+        seed:
+          type: integer
+          format: int64
+          nullable: true
+          description: RNG seed. null or omit for random.
+        saveMode:
+          type: integer
+        agentTypes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentType'
+        biasTypes:
+          type: array
+          items:
+            $ref: '#/components/schemas/BiasType'
+
+    Agent:
+      type: object
+      required: [name, belief, toleranceRadius, toleranceOffset, silenceStrategy, silenceEffect]
+      properties:
+        name:
+          type: string
+        belief:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        toleranceRadius:
+          type: number
+          format: float
+        toleranceOffset:
+          type: number
+          format: float
+        silenceStrategy:
+          type: integer
+        silenceEffect:
+          type: integer
+
+    Edge:
+      type: object
+      required: [source, target, influence, bias]
+      properties:
+        source:
+          type: string
+          description: Source agent name
+        target:
+          type: string
+          description: Target agent name
+        influence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        bias:
+          type: integer
+
+    CustomRunRequest:
+      type: object
+      required: [name, iterationLimit, stopThreshold, saveMode, agents, edges]
+      properties:
+        name:
+          type: string
+        iterationLimit:
+          type: integer
+        stopThreshold:
+          type: number
+          format: float
+        saveMode:
+          type: integer
+        agents:
+          type: array
+          items:
+            $ref: '#/components/schemas/Agent'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/Edge'
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Users
+  - name: Simulations
+  - name: WebSocket
+  - name: Legacy
+    description: Deprecated binary-protocol endpoints. Will be removed after 2026-09-01.
+
+paths:
+
+  # ── Users ──────────────────────────────────────────────────────────────────
+
+  /api/users/sync:
+    post:
+      tags: [Users]
+      summary: Sync authenticated user to DB
+      description: |
+        Creates or updates the user record from the Firebase token.
+        Automatically promotes to Administrator if the email is in `BOOTSTRAP_ADMIN_EMAILS`.
+      responses:
+        '200':
+          description: User info with roles and usage limits
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfo'
+        '401':
+          description: Missing or invalid token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/users/info/{uid}:
+    get:
+      tags: [Users]
+      summary: Get user info
+      description: Owner or Administrator only.
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfo'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/users/role/{uid}/{role}:
+    put:
+      tags: [Users]
+      summary: Add role to user
+      description: Administrator only.
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: role
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [Administrator, Researcher, BaseUser, Guest]
+      responses:
+        '200':
+          description: Role added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uid:
+                    type: string
+                  role:
+                    type: string
+                  action:
+                    type: string
+                    example: added
+        '400':
+          description: Invalid role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ── Simulations ────────────────────────────────────────────────────────────
+
+  /simulations/generated:
+    post:
+      tags: [Simulations]
+      summary: Start a generated (Barabási–Albert) simulation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeneratedRunRequest'
+            example:
+              numberOfNetworks: 1
+              density: 4
+              iterationLimit: 100
+              stopThreshold: 0.001
+              seed: null
+              saveMode: 2
+              agentTypes:
+                - silenceStrategy: 0
+                  silenceEffect: 0
+                  count: 10
+              biasTypes:
+                - biasType: 0
+                  count: 60
+      responses:
+        '200':
+          description: Run started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimCreated'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Usage limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /simulations/custom:
+    post:
+      tags: [Simulations]
+      summary: Start a custom (explicit graph) simulation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomRunRequest'
+            example:
+              name: my-network
+              iterationLimit: 100
+              stopThreshold: 0.001
+              saveMode: 2
+              agents:
+                - name: A
+                  belief: 0.2
+                  toleranceRadius: 0.5
+                  toleranceOffset: 0.0
+                  silenceStrategy: 0
+                  silenceEffect: 0
+                - name: B
+                  belief: 0.8
+                  toleranceRadius: 0.5
+                  toleranceOffset: 0.0
+                  silenceStrategy: 0
+                  silenceEffect: 0
+              edges:
+                - source: A
+                  target: B
+                  influence: 0.5
+                  bias: 0
+                - source: B
+                  target: A
+                  influence: 0.5
+                  bias: 0
+      responses:
+        '200':
+          description: Run started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimCreated'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Usage limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /simulations/mine:
+    get:
+      tags: [Simulations]
+      summary: List own runs (paginated)
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Paginated list of runs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RunSummary'
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+
+  /simulations:
+    get:
+      tags: [Simulations]
+      summary: List all runs — Administrator only
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Paginated list of all runs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RunSummary'
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /simulations/{runId}:
+    get:
+      tags: [Simulations]
+      summary: Get run summary
+      description: Owner or Administrator only.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Run summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunSummary'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Simulations]
+      summary: Cancel / delete a run
+      description: Owner or Administrator only.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runId:
+                    type: string
+                  cancelled:
+                    type: boolean
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /simulations/{runId}/networks:
+    get:
+      tags: [Simulations]
+      summary: List networks for a run
+      description: |
+        Returns the networkIds cached after `topology_ready`. Empty array if the run
+        has not yet emitted `topology_ready`. Owner or Administrator only.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Network list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runId:
+                    type: string
+                  networks:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+        '403':
+          description: Forbidden
+        '404':
+          description: Run not found
+
+  /simulations/{runId}/networks/{networkId}/topology:
+    get:
+      tags: [Simulations]
+      summary: Get initial network topology
+      description: |
+        Returns the full graph snapshot captured at simulation start (after `topology_ready` event).
+        Returns `202 Accepted` if the simulation has not yet reached `topology_ready`.
+        Owner or Administrator only.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: networkId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: agentOffset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: agentLimit
+          in: query
+          schema:
+            type: integer
+            default: 500
+        - name: edgeOffset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: edgeLimit
+          in: query
+          schema:
+            type: integer
+            default: 1000
+      responses:
+        '200':
+          description: Paginated topology snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runId:
+                    type: string
+                  networkId:
+                    type: string
+                  agentCount:
+                    type: integer
+                    description: Total agents in the network
+                  edgeCount:
+                    type: integer
+                    description: Total edges in the network
+                  agentOffset:
+                    type: integer
+                  agentLimit:
+                    type: integer
+                  edgeOffset:
+                    type: integer
+                  edgeLimit:
+                    type: integer
+                  agents:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index:
+                          type: integer
+                        name:
+                          type: string
+                          nullable: true
+                        initialBelief:
+                          type: number
+                          format: float
+                        toleranceRadius:
+                          type: number
+                          format: float
+                        toleranceOffset:
+                          type: number
+                          format: float
+                        silenceStrategy:
+                          type: integer
+                        silenceEffect:
+                          type: integer
+                  edges:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        source:
+                          type: integer
+                        target:
+                          type: integer
+                        influence:
+                          type: number
+                          format: float
+                        bias:
+                          type: integer
+        '202':
+          description: Topology not yet available — retry after `topology_ready` event
+        '403':
+          description: Forbidden
+        '404':
+          description: Run not found
+
+  /simulations/{runId}/networks/{networkId}/results:
+    get:
+      tags: [Simulations]
+      summary: Get final network results
+      description: |
+        Returns per-agent final beliefs captured at convergence (after `network_converged` event).
+        Returns `202 Accepted` if the simulation has not yet converged.
+        Owner or Administrator only.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: networkId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 500
+      responses:
+        '200':
+          description: Paginated convergence results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runId:
+                    type: string
+                  networkId:
+                    type: string
+                  finalRound:
+                    type: integer
+                  consensus:
+                    type: boolean
+                  agentCount:
+                    type: integer
+                    description: Total agents in the network
+                  offset:
+                    type: integer
+                  limit:
+                    type: integer
+                  agents:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index:
+                          type: integer
+                        name:
+                          type: string
+                          nullable: true
+                        finalBelief:
+                          type: number
+                          format: float
+                        publicBelief:
+                          type: number
+                          format: float
+        '202':
+          description: Results not yet available — retry after `network_converged` event
+        '403':
+          description: Forbidden
+        '404':
+          description: Run not found
+
+  /simulations/{runId}/ws-ticket:
+    post:
+      tags: [Simulations]
+      summary: Issue a fresh WS ticket
+      description: |
+        Issues a new single-use ticket for WebSocket reconnections.
+        Ticket expires in 30 seconds. Owner or Administrator only.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Ticket issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  wsTicket:
+                    type: string
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Run not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ── WebSocket ──────────────────────────────────────────────────────────────
+
+  /simulations/{runId}/stream:
+    get:
+      tags: [WebSocket]
+      summary: WebSocket stream for a simulation run
+      description: |
+        Upgrades the connection to WebSocket. Requires a single-use ticket.
+
+        **Text frames (JSON control events):**
+        ```json
+        {"event":"topology_ready",   "runId":"...", "networkId":"..."}
+        {"event":"network_started",  "runId":"...", "networkId":"..."}
+        {"event":"network_converged","runId":"...", "networkId":"...","round":10,"consensus":true}
+        {"event":"run_completed",    "runId":"..."}
+        ```
+
+        **Binary frames:** agent belief state per round (proprietary binary protocol).
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: ticket
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Single-use ticket from run creation or `/ws-ticket`. Expires in 30s.
+      responses:
+        '101':
+          description: Switching Protocols — WebSocket connection established
+        '403':
+          description: Invalid or expired ticket
+        '404':
+          description: Run not active
+
+  # ── Legacy ─────────────────────────────────────────────────────────────────
+
+  /run:
+    post:
+      tags: [Legacy]
+      deprecated: true
+      summary: "[Deprecated] Start generated run — binary protocol"
+      description: |
+        Use `POST /simulations/generated` instead.
+        Responses include `Deprecation`, `Sunset` (2026-09-01), `Link`, and `Warning` headers.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      security: []
+      responses:
+        '200':
+          description: Raw channel ID string
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /custom:
+    post:
+      tags: [Legacy]
+      deprecated: true
+      summary: "[Deprecated] Start custom run — binary protocol"
+      description: Use `POST /simulations/custom` instead.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      security: []
+      responses:
+        '200':
+          description: Raw channel ID string
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /ws/{channelId}:
+    get:
+      tags: [Legacy]
+      deprecated: true
+      summary: "[Deprecated] WebSocket by raw channel ID"
+      description: Use `GET /simulations/{runId}/stream?ticket=<t>` instead.
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          schema:
+            type: string
+      security: []
+      responses:
+        '101':
+          description: Switching Protocols

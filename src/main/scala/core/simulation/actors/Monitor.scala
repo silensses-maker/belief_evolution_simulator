@@ -7,7 +7,7 @@ import core.model.agent.behavior.silence.SilenceStrategies.SilenceStrategy
 import core.simulation.config.*
 import core.simulation.config.SaveModes.SaveMode
 import io.persistence.RoundRouter
-import io.web.CustomRunInfo
+import io.web.{CustomRunInfo, Server}
 import utils.datastructures.SnowflakeID
 import utils.logging.Logger
 import utils.rng.distributions.{CustomDistribution, Distribution, Uniform}
@@ -132,6 +132,8 @@ class Monitor extends Actor {
     
     // Runs
     val activeRuns: mutable.HashMap[String, (ActorRef, Long)] = mutable.HashMap.empty[String, (ActorRef, Long)]
+    val runChannelIds: mutable.HashMap[String, String] = mutable.HashMap.empty[String, String]
+    val runIds: mutable.HashMap[String, Long] = mutable.HashMap.empty[String, Long]
     var totalRuns: Int = 0
     var totalActiveNetworks: Long = 0L
     var totalActiveAgents: Long = 0L
@@ -168,7 +170,7 @@ class Monitor extends Actor {
                 map.map { case ((strategy, effect), count) => (strategy, effect, count) }.toArray
             
             val runActor = context.actorOf(Props(new Run(runMetadata, customInfo, agentTypeCount)), s"R$totalRuns")
-            trackRunMemory(runActor, 1, customInfo.agentBeliefs.length, customInfo.target.length)
+            trackRunMemory(runActor, runMetadata.runID, runMetadata.channelId, 1, customInfo.agentBeliefs.length, customInfo.target.length)
             simulationTimers.start(s"${runActor.path.name}")
 
         
@@ -196,7 +198,7 @@ class Monitor extends Actor {
             
             val actor = context.actorOf(Props(new Run(runMetadata, agentTypeCount, agentBiases)), s"R$totalRuns")
             val numberOfNeighbors = (m * (m-1)) + (n - m) * (2 * m)
-            trackRunMemory(actor, numberOfNetworks, runMetadata.agentsPerNetwork, numberOfNeighbors)
+            trackRunMemory(actor, runMetadata.runID, runMetadata.channelId, numberOfNetworks, runMetadata.agentsPerNetwork, numberOfNeighbors)
             
             simulationTimers.start(s"${actor.path.name}")
             actor ! StartRun
@@ -222,7 +224,7 @@ class Monitor extends Actor {
             val agentTypeCount = Array((silenceStrategy, silenceEffect, 18470))
             val agentBiases = Array((bias, 61157))
             val actor = context.actorOf(Props(new Run(runMetadata, path, agentTypeCount, agentBiases)), s"R$totalRuns")
-            trackRunMemory(actor, 1, runMetadata.agentsPerNetwork, 61157)
+            trackRunMemory(actor, runMetadata.runID, runMetadata.channelId, 1, runMetadata.agentsPerNetwork, 61157)
             
             simulationTimers.start(s"${actor.path.name}")
             actor ! StartRun
@@ -232,7 +234,15 @@ class Monitor extends Actor {
             val senderActor = sender().path.name
             simulationTimers.stop(senderActor)
             memoryLeft += activeRuns(senderActor)._2
-            activeRuns -= senderActor
+            for {
+                channelId <- runChannelIds.get(senderActor)
+                runId     <- runIds.get(senderActor)
+            } {
+                Server.sendControlEvent(channelId, s"""{"event":"run_completed","runId":"$runId"}""")
+            }
+            activeRuns    -= senderActor
+            runChannelIds -= senderActor
+            runIds        -= senderActor
             
         case GetStatus =>
             Logger.log(f"\nTotal runs: $totalRuns\n" +
@@ -244,21 +254,24 @@ class Monitor extends Actor {
     }
     
     
-    private def trackRunMemory(runActor: ActorRef, numberOfNetworks: Int, agentsPerNetwork: Int, neighborsPerNetwork: Int):
+    private def trackRunMemory(runActor: ActorRef, runId: Long, channelId: String, numberOfNetworks: Int, agentsPerNetwork: Int, neighborsPerNetwork: Int):
     Unit = {
         // ~64 bytes per agent
         // ~9 bytes per neighbor
         // 95% memory max
         val runMemoryUsage = (numberOfNetworks * agentsPerNetwork * 64) +
           (numberOfNetworks * neighborsPerNetwork * 9)
-        
+
         if (memoryLeft >= runMemoryUsage) {
-        
+
         } else {
             Logger.logWarning(s"Exceeding memory limits: ${memoryLeft}")
         }
         memoryLeft -= runMemoryUsage
-        activeRuns += (runActor.path.name -> (runActor, runMemoryUsage))
+        val name = runActor.path.name
+        activeRuns += (name -> (runActor, runMemoryUsage))
+        runChannelIds += (name -> channelId)
+        runIds += (name -> runId)
     }
     
     
