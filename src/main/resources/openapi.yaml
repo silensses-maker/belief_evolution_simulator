@@ -9,11 +9,11 @@ info:
 
     **Save modes:** `0` = FULL (persists to DB), `1` = PARTIAL, `2` = DEBUG (no DB writes — use in dev).
 
-    **Silence strategies:** `0` = DEFAULT, `1` = MAJORITY, `2` = CONFIDENCE
+    **Silence strategies:** `0` = DEGROOT, `1` = MAJORITY, `2` = THRESHOLD, `3` = CONFIDENCE
 
-    **Silence effects:** `0` = DEFAULT, `1` = NONE
+    **Silence effects:** `0` = DEGROOT, `1` = MEMORY, `2` = MEMORYLESS
 
-    **Cognitive biases:** `0` = NONE, `1` = CONFIRMATION, `2` = BACKFIRE, `3` = AUTHORITY
+    **Cognitive biases:** `0` = DEGROOT, `1` = CONFIRMATION, `2` = BACKFIRE, `3` = AUTHORITY, `4` = INSULAR
 
 servers:
   - url: http://localhost:9000
@@ -95,6 +95,24 @@ components:
         createdAt:
           type: string
           format: date-time
+        status:
+          type: string
+          enum: [running, completed, cancelled, error]
+          description: |
+            Run lifecycle state.
+            - `running`: at least one network is still active. Initial state at run creation.
+            - `completed`: `Monitor` emitted `run_completed` (all networks done — converged or hit iteration limit).
+            - `cancelled`: `DELETE /simulations/{runId}` was processed.
+            - `error`: runtime error halted the run.
+
+            Convergence is per-network and surfaces via the `network_converged` WS event;
+            at the run level a converged run is just `completed`.
+
+            **Limitation:** `status` is persisted only when the run row is written to DB.
+            Runs created with `saveMode=DEBUG` (no DB writes) will return `404 Not Found`
+            on reconnect — the frontend should treat 404 as "run no longer trackable" rather
+            than "never existed". For DEBUG runs, status must be inferred from live WS
+            events while the connection is open.
 
     SimCreated:
       type: object
@@ -121,8 +139,12 @@ components:
       properties:
         silenceStrategy:
           type: integer
+          enum: [0, 1, 2, 3]
+          description: "0=DEGROOT, 1=MAJORITY, 2=THRESHOLD, 3=CONFIDENCE"
         silenceEffect:
           type: integer
+          enum: [0, 1, 2]
+          description: "0=DEGROOT, 1=MEMORY, 2=MEMORYLESS"
         count:
           type: integer
           description: Number of agents of this type
@@ -133,6 +155,8 @@ components:
       properties:
         biasType:
           type: integer
+          enum: [0, 1, 2, 3, 4]
+          description: "0=DEGROOT, 1=CONFIRMATION, 2=BACKFIRE, 3=AUTHORITY, 4=INSULAR"
         count:
           type: integer
           description: |
@@ -191,8 +215,12 @@ components:
           format: float
         silenceStrategy:
           type: integer
+          enum: [0, 1, 2, 3]
+          description: "0=DEGROOT, 1=MAJORITY, 2=THRESHOLD, 3=CONFIDENCE"
         silenceEffect:
           type: integer
+          enum: [0, 1, 2]
+          description: "0=DEGROOT, 1=MEMORY, 2=MEMORYLESS"
 
     Edge:
       type: object
@@ -211,6 +239,8 @@ components:
           maximum: 1
         bias:
           type: integer
+          enum: [0, 1, 2, 3, 4]
+          description: "0=DEGROOT, 1=CONFIRMATION, 2=BACKFIRE, 3=AUTHORITY, 4=INSULAR"
 
     CustomRunRequest:
       type: object
@@ -720,8 +750,12 @@ paths:
                           format: float
                         silenceStrategy:
                           type: integer
+                          enum: [0, 1, 2, 3]
+                          description: "0=DEGROOT, 1=MAJORITY, 2=THRESHOLD, 3=CONFIDENCE"
                         silenceEffect:
                           type: integer
+                          enum: [0, 1, 2]
+                          description: "0=DEGROOT, 1=MEMORY, 2=MEMORYLESS"
                   edges:
                     type: array
                     items:
@@ -736,6 +770,8 @@ paths:
                           format: float
                         bias:
                           type: integer
+                          enum: [0, 1, 2, 3, 4]
+                          description: "0=DEGROOT, 1=CONFIRMATION, 2=BACKFIRE, 3=AUTHORITY, 4=INSULAR"
         '202':
           description: Topology not yet available — retry after `topology_ready` event
         '403':
@@ -874,7 +910,42 @@ paths:
         {"event":"run_completed",    "runId":"..."}
         ```
 
-        **Binary frames:** agent belief state per round (proprietary binary protocol).
+        **Binary frames:** agent belief state per round, little-endian.
+
+        Source of truth: `AgentProcessor.scala:465-470` (header) + `461-482` (full frame writer).
+
+        ```
+        Header (36 bytes, little-endian):
+          0-7    int64    networkId.mostSigBits
+          8-15   int64    networkId.leastSigBits
+          16-23  int64    runId           (Snowflake ID — read with BigInt on JS)
+          24-27  int32    numberOfAgents  (in this partition)
+          28-31  int32    round
+          32-35  int32    startsAt        (index of the first agent in this partition)
+
+        Belief data (numberOfAgents × 8 bytes):
+          [publicBelief (float32), privateBelief (float32)] × n
+
+        Speaking data (numberOfAgents × 1 byte):
+          [isSpeaking (uint8)] × n
+        ```
+
+        Total payload size per frame: `36 + 9 * numberOfAgents` bytes.
+
+        **Partitioning.** A single round may emit multiple binary frames with different
+        `startsAt` values — multiple `AgentProcessor` actors write to the same channel and
+        partition the agent ID space. Each frame covers the slice
+        `[startsAt, startsAt + numberOfAgents)`. The client merges partitions by
+        `(runId, networkId, round)`, indexed on `startsAt`, before treating the round as
+        complete.
+
+        **Belief is a pair.** Each agent reports both `publicBelief` and `privateBelief`.
+        Visualization (Spiral of Silence) uses `publicBelief`; the inspector and analytical
+        dashboard may surface `privateBelief`. Both must be exposed in the parsed
+        `SimulationFrame`.
+
+        **Bandwidth example.** 100k agents at 30 Hz, 4 partitions of 25k each:
+        `4 × (36 + 9 × 25_000) = ~900 KB/s` of WS traffic.
       parameters:
         - name: runId
           in: path
