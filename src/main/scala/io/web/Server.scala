@@ -18,7 +18,7 @@ import core.model.agent.behavior.bias.CognitiveBiases.Bias
 import core.model.agent.behavior.silence.SilenceEffects.SilenceEffect
 import core.model.agent.behavior.silence.{SilenceEffects, SilenceStrategies}
 import core.model.agent.behavior.silence.SilenceStrategies.SilenceStrategy
-import core.simulation.actors.{AddNetworks, RunCustomNetwork}
+import core.simulation.actors.{AddNetworks, CancelRun, RunCustomNetwork}
 import core.simulation.config.*
 import core.simulation.config.SaveModes.SaveMode
 import utils.logging.Logger
@@ -375,7 +375,8 @@ object Server {
                |  "networkCount": ${r.networkCount},
                |  "iterationLimit": ${r.iterationLimit},
                |  "stopThreshold": ${r.stopThreshold},
-               |  "createdAt": "${r.createdAt}"
+               |  "createdAt": "${r.createdAt}",
+               |  "status": "${r.status}"
                |}""".stripMargin
 
         def jsonOk(body: String): HttpResponse =
@@ -507,7 +508,8 @@ object Server {
                                     errorJson("not_found", "Run not found"))
                                 case Some(ownerId) =>
                                     if (ownerId == authUser.dbUserId || authUser.isAdmin) {
-                                        // No CancelRun message yet — Phase 4 adds actor protocol
+                                        DatabaseManager.setRunStatus(runId, "cancelled")
+                                        monitor ! CancelRun(runId)
                                         complete(jsonOk(s"""{"runId":"$runId","cancelled":true}"""))
                                     } else {
                                         complete(StatusCodes.Forbidden ->

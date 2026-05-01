@@ -1387,7 +1387,8 @@ object DatabaseManager {
         iterationLimit: Int,
         stopThreshold: Float,
         createdAt: String,
-        userId: Option[Int]
+        userId: Option[Int],
+        status: String
     )
 
     private def queryRuns(userClause: String, limit: Int, offset: Int, params: Seq[Any]): Seq[RunSummary] = {
@@ -1396,11 +1397,11 @@ object DatabaseManager {
             val sql =
                 s"""
                    |SELECT id, 'generated' AS run_type, NULL AS name,
-                   |       total_networks AS network_count, iteration_limit, stop_threshold, user_id
+                   |       total_networks AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status
                    |FROM generated_runs $userClause
                    |UNION ALL
                    |SELECT id, 'custom' AS run_type, run_name AS name,
-                   |       1 AS network_count, iteration_limit, stop_threshold, user_id
+                   |       1 AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status
                    |FROM custom_runs $userClause
                    |ORDER BY id DESC
                    |LIMIT ? OFFSET ?
@@ -1429,7 +1430,8 @@ object DatabaseManager {
                     iterationLimit = rs.getInt("iteration_limit"),
                     stopThreshold  = rs.getFloat("stop_threshold"),
                     createdAt    = snowflakeToIso(rs.getLong("id")),
-                    userId       = Option(rs.getObject("user_id")).map(_.toString.toInt)
+                    userId       = Option(rs.getObject("user_id")).map(_.toString.toInt),
+                    status       = rs.getString("status")
                 )
             }
             buf.toSeq
@@ -1496,11 +1498,11 @@ object DatabaseManager {
             val sql =
                 """
                   |SELECT id, 'generated' AS run_type, NULL AS name,
-                  |       total_networks AS network_count, iteration_limit, stop_threshold, user_id
+                  |       total_networks AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status
                   |FROM generated_runs WHERE id = ?
                   |UNION ALL
                   |SELECT id, 'custom' AS run_type, run_name AS name,
-                  |       1 AS network_count, iteration_limit, stop_threshold, user_id
+                  |       1 AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status
                   |FROM custom_runs WHERE id = ?
                   |LIMIT 1
                   |""".stripMargin
@@ -1516,13 +1518,42 @@ object DatabaseManager {
                 iterationLimit = rs.getInt("iteration_limit"),
                 stopThreshold  = rs.getFloat("stop_threshold"),
                 createdAt      = snowflakeToIso(rs.getLong("id")),
-                userId         = Option(rs.getObject("user_id")).map(_.toString.toInt)
+                userId         = Option(rs.getObject("user_id")).map(_.toString.toInt),
+                status         = rs.getString("status")
             ))
             else None
         } catch {
             case ex: Exception =>
                 Logger.logError(s"getRunSummary failed: ${ex.getMessage}")
                 None
+        } finally {
+            conn.close()
+        }
+    }
+
+    def setRunStatus(runId: Long, status: String): Boolean = {
+        if (GlobalState.APP_MODE.skipDatabase) return false
+        val conn = getConnection
+        try {
+            val updateGenerated = conn.prepareStatement(
+                "UPDATE generated_runs SET status = ?::run_status WHERE id = ?"
+            )
+            updateGenerated.setString(1, status)
+            updateGenerated.setLong(2, runId)
+            val genRows = updateGenerated.executeUpdate()
+
+            val updateCustom = conn.prepareStatement(
+                "UPDATE custom_runs SET status = ?::run_status WHERE id = ?"
+            )
+            updateCustom.setString(1, status)
+            updateCustom.setLong(2, runId)
+            val customRows = updateCustom.executeUpdate()
+
+            (genRows + customRows) > 0
+        } catch {
+            case ex: Exception =>
+                Logger.logError(s"setRunStatus($runId, $status) failed: ${ex.getMessage}")
+                false
         } finally {
             conn.close()
         }

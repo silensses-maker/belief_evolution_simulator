@@ -1,11 +1,12 @@
 package core.simulation.actors
 
-import akka.actor.{Actor, ActorRef, Props}
+import akka.actor.{Actor, ActorRef, PoisonPill, Props}
 import core.model.agent.behavior.bias.CognitiveBiases.Bias
 import core.model.agent.behavior.silence.SilenceEffects.SilenceEffect
 import core.model.agent.behavior.silence.SilenceStrategies.SilenceStrategy
 import core.simulation.config.*
 import core.simulation.config.SaveModes.SaveMode
+import io.db.DatabaseManager
 import io.persistence.RoundRouter
 import io.web.{CustomRunInfo, Server}
 import utils.datastructures.SnowflakeID
@@ -107,6 +108,8 @@ case class Neighbors(
 )
 
 case class RunCustomNetwork(customInfo: CustomRunInfo)
+
+case class CancelRun(runId: Long) // HTTP -> Monitor
 
 case object RunComplete // Monitor -> Run
 
@@ -238,12 +241,30 @@ class Monitor extends Actor {
                 channelId <- runChannelIds.get(senderActor)
                 runId     <- runIds.get(senderActor)
             } {
+                DatabaseManager.setRunStatus(runId, "completed")
                 Server.sendControlEvent(channelId, s"""{"event":"run_completed","runId":"$runId"}""")
             }
             activeRuns    -= senderActor
             runChannelIds -= senderActor
             runIds        -= senderActor
-            
+
+        case CancelRun(runId) =>
+            runIds.find { case (_, id) => id == runId } match {
+                case Some((senderActor, _)) =>
+                    Logger.log(s"\nCancelling run $runId ($senderActor)\n")
+                    activeRuns.get(senderActor).foreach { case (actorRef, mem) =>
+                        actorRef ! PoisonPill
+                        memoryLeft += mem
+                    }
+                    simulationTimers.stop(senderActor)
+                    activeRuns    -= senderActor
+                    runChannelIds -= senderActor
+                    runIds        -= senderActor
+                case None =>
+                    // Run is no longer active in this Monitor (already completed, never started, or unknown).
+                    // The HTTP handler still persists status='cancelled' in DB; this is a no-op for the actor system.
+            }
+
         case GetStatus =>
             Logger.log(f"\nTotal runs: $totalRuns\n" +
                       f"Active runs: ${activeRuns.size}\n" +
