@@ -1,0 +1,1180 @@
+openapi: 3.0.3
+info:
+  title: Belief Evolution Simulator API
+  version: 1.0.0
+  description: |
+    REST + WebSocket API for the Belief Evolution Simulator.
+
+    All protected endpoints require `Authorization: Bearer <Firebase idToken>`.
+
+    **Save modes:** `0` = FULL (persists to DB), `1` = PARTIAL, `2` = DEBUG (no DB writes — use in dev).
+
+    **Silence strategies:** `0` = DEGROOT, `1` = MAJORITY, `2` = THRESHOLD, `3` = CONFIDENCE
+
+    **Silence effects:** `0` = DEGROOT, `1` = MEMORY, `2` = MEMORYLESS
+
+    **Cognitive biases:** `0` = DEGROOT, `1` = CONFIRMATION, `2` = BACKFIRE, `3` = AUTHORITY, `4` = INSULAR
+
+servers:
+  - url: http://localhost:9000
+    description: Local development
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Firebase idToken
+
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          example: forbidden
+        message:
+          type: string
+          example: Admin role required
+
+    UsageLimits:
+      type: object
+      properties:
+        maxAgents:
+          type: integer
+          nullable: true
+        maxIterations:
+          type: integer
+          nullable: true
+        densityFactor:
+          type: number
+          format: float
+
+    UserInfo:
+      type: object
+      properties:
+        uid:
+          type: string
+        email:
+          type: string
+        name:
+          type: string
+        photo:
+          type: string
+          nullable: true
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [Administrator, Researcher, BaseUser, Guest]
+        usageLimits:
+          $ref: '#/components/schemas/UsageLimits'
+        deactivated:
+          type: boolean
+
+    RunSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Snowflake ID (64-bit, returned as string)
+        type:
+          type: string
+          enum: [generated, custom]
+        name:
+          type: string
+          nullable: true
+        networkCount:
+          type: integer
+        iterationLimit:
+          type: integer
+        stopThreshold:
+          type: number
+          format: float
+        createdAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [running, completed, cancelled, error]
+          description: |
+            Run lifecycle state.
+            - `running`: at least one network is still active. Initial state at run creation.
+            - `completed`: `Monitor` emitted `run_completed` (all networks done — converged or hit iteration limit).
+            - `cancelled`: `DELETE /simulations/{runId}` was processed.
+            - `error`: runtime error halted the run.
+
+            Convergence is per-network and surfaces via the `network_converged` WS event;
+            at the run level a converged run is just `completed`.
+
+            **Limitation:** `status` is persisted only when the run row is written to DB.
+            Runs created with `saveMode=DEBUG` (no DB writes) will return `404 Not Found`
+            on reconnect — the frontend should treat 404 as "run no longer trackable" rather
+            than "never existed". For DEBUG runs, status must be inferred from live WS
+            events while the connection is open.
+
+    SimCreated:
+      type: object
+      properties:
+        runId:
+          type: string
+          description: Snowflake ID (64-bit, returned as string)
+        status:
+          type: string
+          enum: [running]
+        networkCount:
+          type: integer
+        wsUrl:
+          type: string
+          example: /ws
+          description: |
+            Constant path of the persistent WebSocket endpoint.
+            After receiving this response, send `{"type":"subscribe","runId":"<runId>"}` over the
+            already-open WS connection (see `GET /ws`).
+
+    AgentType:
+      type: object
+      required: [silenceStrategy, silenceEffect, count]
+      properties:
+        silenceStrategy:
+          type: integer
+          enum: [0, 1, 2, 3]
+          description: "0=DEGROOT, 1=MAJORITY, 2=THRESHOLD, 3=CONFIDENCE"
+        silenceEffect:
+          type: integer
+          enum: [0, 1, 2]
+          description: "0=DEGROOT, 1=MEMORY, 2=MEMORYLESS"
+        count:
+          type: integer
+          description: Number of agents of this type
+
+    BiasType:
+      type: object
+      required: [biasType, count]
+      properties:
+        biasType:
+          type: integer
+          enum: [0, 1, 2, 3, 4]
+          description: "0=DEGROOT, 1=CONFIRMATION, 2=BACKFIRE, 3=AUTHORITY, 4=INSULAR"
+        count:
+          type: integer
+          description: |
+            Total number of EDGES in the network (not agents).
+            Formula: density*(density-1) + (numberOfAgents - density) * 2*density
+
+    GeneratedRunRequest:
+      type: object
+      required: [numberOfNetworks, density, iterationLimit, stopThreshold, saveMode, agentTypes, biasTypes]
+      properties:
+        numberOfNetworks:
+          type: integer
+          minimum: 1
+        density:
+          type: integer
+          minimum: 2
+          description: Barabási–Albert m parameter (edges added per new node)
+        iterationLimit:
+          type: integer
+        stopThreshold:
+          type: number
+          format: float
+          description: Convergence threshold (e.g. 0.001)
+        seed:
+          type: integer
+          format: int64
+          nullable: true
+          description: RNG seed. null or omit for random.
+        saveMode:
+          type: integer
+        agentTypes:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentType'
+        biasTypes:
+          type: array
+          items:
+            $ref: '#/components/schemas/BiasType'
+        persistFrames:
+          type: boolean
+          default: false
+          description: |
+            When `true`, the backend persists every WS round frame so they can be replayed via
+            `GET /simulations/{runId}/networks/{networkId}/frames`. Enables timeline scrubbing,
+            page-refresh resilience mid-simulation, and recovery for sims that complete before
+            the WebSocket connects.
+        frameRetention:
+          type: string
+          enum: [ephemeral, persistent]
+          default: ephemeral
+          description: |
+            Retention policy for persisted frames. `ephemeral` (default) deletes frames ~60 minutes
+            after the run leaves the `running` state. `persistent` keeps them indefinitely and is
+            restricted to users with the `Administrator` role; non-admins requesting `persistent`
+            receive `403 forbidden`.
+
+    Agent:
+      type: object
+      required: [name, belief, toleranceRadius, toleranceOffset, silenceStrategy, silenceEffect]
+      properties:
+        name:
+          type: string
+        belief:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        toleranceRadius:
+          type: number
+          format: float
+        toleranceOffset:
+          type: number
+          format: float
+        silenceStrategy:
+          type: integer
+          enum: [0, 1, 2, 3]
+          description: "0=DEGROOT, 1=MAJORITY, 2=THRESHOLD, 3=CONFIDENCE"
+        silenceEffect:
+          type: integer
+          enum: [0, 1, 2]
+          description: "0=DEGROOT, 1=MEMORY, 2=MEMORYLESS"
+
+    Edge:
+      type: object
+      required: [source, target, influence, bias]
+      properties:
+        source:
+          type: string
+          description: Source agent name
+        target:
+          type: string
+          description: Target agent name
+        influence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        bias:
+          type: integer
+          enum: [0, 1, 2, 3, 4]
+          description: "0=DEGROOT, 1=CONFIRMATION, 2=BACKFIRE, 3=AUTHORITY, 4=INSULAR"
+
+    CustomRunRequest:
+      type: object
+      required: [name, iterationLimit, stopThreshold, saveMode, agents, edges]
+      properties:
+        name:
+          type: string
+        iterationLimit:
+          type: integer
+        stopThreshold:
+          type: number
+          format: float
+        saveMode:
+          type: integer
+        agents:
+          type: array
+          items:
+            $ref: '#/components/schemas/Agent'
+        edges:
+          type: array
+          items:
+            $ref: '#/components/schemas/Edge'
+        persistFrames:
+          type: boolean
+          default: false
+          description: |
+            When `true`, the backend persists every WS round frame so they can be replayed via
+            `GET /simulations/{runId}/networks/{networkId}/frames`.
+        frameRetention:
+          type: string
+          enum: [ephemeral, persistent]
+          default: ephemeral
+          description: |
+            `ephemeral` deletes frames ~60 minutes after the run leaves `running`. `persistent`
+            keeps them indefinitely and is restricted to Administrators.
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Users
+  - name: Simulations
+  - name: WebSocket
+  - name: Legacy
+    description: Deprecated binary-protocol endpoints. Will be removed after 2026-09-01.
+
+paths:
+
+  # ── Users ──────────────────────────────────────────────────────────────────
+
+  /api/users/sync:
+    post:
+      tags: [Users]
+      summary: Sync authenticated user to DB
+      description: |
+        Creates or updates the user record from the Firebase token.
+        Automatically promotes to Administrator if the email is in `BOOTSTRAP_ADMIN_EMAILS`.
+      responses:
+        '200':
+          description: User info with roles and usage limits
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfo'
+        '401':
+          description: Missing or invalid token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/users/info/{uid}:
+    get:
+      tags: [Users]
+      summary: Get user info
+      description: Owner or Administrator only.
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User info
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfo'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/users/role/{uid}/{role}:
+    put:
+      tags: [Users]
+      summary: Add role to user
+      description: Administrator only.
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: role
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [Administrator, Researcher, BaseUser, Guest]
+      responses:
+        '200':
+          description: Role added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uid:
+                    type: string
+                  role:
+                    type: string
+                  action:
+                    type: string
+                    example: added
+        '400':
+          description: Invalid role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ── Simulations ────────────────────────────────────────────────────────────
+
+  /simulations/generated:
+    post:
+      tags: [Simulations]
+      summary: Start a generated (Barabási–Albert) simulation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeneratedRunRequest'
+            example:
+              numberOfNetworks: 1
+              density: 4
+              iterationLimit: 100
+              stopThreshold: 0.001
+              seed: null
+              saveMode: 2
+              agentTypes:
+                - silenceStrategy: 0
+                  silenceEffect: 0
+                  count: 10
+              biasTypes:
+                - biasType: 0
+                  count: 60
+      responses:
+        '200':
+          description: Run started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimCreated'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Usage limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /simulations/custom:
+    post:
+      tags: [Simulations]
+      summary: Start a custom (explicit graph) simulation
+      description: >
+        Accepts two content types. Use `application/json` for networks with fewer than 1000
+        agents. For larger networks, send `application/octet-stream` with the binary
+        little-endian payload (same format as the legacy `POST /custom` endpoint) to avoid
+        serializing a large JSON body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CustomRunRequest'
+            example:
+              name: my-network
+              iterationLimit: 100
+              stopThreshold: 0.001
+              saveMode: 2
+              agents:
+                - name: A
+                  belief: 0.2
+                  toleranceRadius: 0.5
+                  toleranceOffset: 0.0
+                  silenceStrategy: 0
+                  silenceEffect: 0
+                - name: B
+                  belief: 0.8
+                  toleranceRadius: 0.5
+                  toleranceOffset: 0.0
+                  silenceStrategy: 0
+                  silenceEffect: 0
+              edges:
+                - source: A
+                  target: B
+                  influence: 0.5
+                  bias: 0
+                - source: B
+                  target: A
+                  influence: 0.5
+                  bias: 0
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+            description: >
+              Binary payload (little-endian). Recommended for networks with 1000 or more
+              agents. Format is identical to the legacy `POST /custom` binary protocol
+              (see that endpoint for the byte layout reference).
+      responses:
+        '200':
+          description: Run started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SimCreated'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Usage limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /simulations/mine:
+    get:
+      tags: [Simulations]
+      summary: List own runs (paginated)
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Paginated list of runs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RunSummary'
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+
+  /simulations:
+    get:
+      tags: [Simulations]
+      summary: List all runs — Administrator only
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: Paginated list of all runs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RunSummary'
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /simulations/{runId}:
+    get:
+      tags: [Simulations]
+      summary: Get run summary
+      description: Owner or Administrator only.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Run summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunSummary'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Simulations]
+      summary: Cancel / delete a run
+      description: Owner or Administrator only.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runId:
+                    type: string
+                  cancelled:
+                    type: boolean
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /simulations/{runId}/networks:
+    get:
+      tags: [Simulations]
+      summary: List networks for a run
+      description: |
+        Returns the networkIds cached after `topology_ready`. Empty array if the run
+        has not yet emitted `topology_ready`. Owner or Administrator only.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Network list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runId:
+                    type: string
+                  networks:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+        '403':
+          description: Forbidden
+        '404':
+          description: Run not found
+
+  /simulations/{runId}/networks/{networkId}/topology:
+    get:
+      tags: [Simulations]
+      summary: Get initial network topology
+      description: |
+        Returns the full graph snapshot captured at simulation start (after `topology_ready` event).
+        Returns `202 Accepted` if the simulation has not yet reached `topology_ready`.
+        Owner or Administrator only.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: networkId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: agentOffset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: agentLimit
+          in: query
+          schema:
+            type: integer
+            default: 500
+        - name: edgeOffset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: edgeLimit
+          in: query
+          schema:
+            type: integer
+            default: 1000
+      responses:
+        '200':
+          description: Paginated topology snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runId:
+                    type: string
+                  networkId:
+                    type: string
+                  agentCount:
+                    type: integer
+                    description: Total agents in the network
+                  edgeCount:
+                    type: integer
+                    description: Total edges in the network
+                  agentOffset:
+                    type: integer
+                  agentLimit:
+                    type: integer
+                  edgeOffset:
+                    type: integer
+                  edgeLimit:
+                    type: integer
+                  agents:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index:
+                          type: integer
+                        name:
+                          type: string
+                          nullable: true
+                        initialBelief:
+                          type: number
+                          format: float
+                        toleranceRadius:
+                          type: number
+                          format: float
+                        toleranceOffset:
+                          type: number
+                          format: float
+                        silenceStrategy:
+                          type: integer
+                          enum: [0, 1, 2, 3]
+                          description: "0=DEGROOT, 1=MAJORITY, 2=THRESHOLD, 3=CONFIDENCE"
+                        silenceEffect:
+                          type: integer
+                          enum: [0, 1, 2]
+                          description: "0=DEGROOT, 1=MEMORY, 2=MEMORYLESS"
+                  edges:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        source:
+                          type: integer
+                        target:
+                          type: integer
+                        influence:
+                          type: number
+                          format: float
+                        bias:
+                          type: integer
+                          enum: [0, 1, 2, 3, 4]
+                          description: "0=DEGROOT, 1=CONFIRMATION, 2=BACKFIRE, 3=AUTHORITY, 4=INSULAR"
+        '202':
+          description: Topology not yet available — retry after `topology_ready` event
+        '403':
+          description: Forbidden
+        '404':
+          description: Run not found
+
+  /simulations/{runId}/networks/{networkId}/results:
+    get:
+      tags: [Simulations]
+      summary: Get final network results
+      description: |
+        Returns per-agent final beliefs captured at convergence (after `network_converged` event).
+        Returns `202 Accepted` if the simulation has not yet converged.
+        Owner or Administrator only.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: networkId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 500
+      responses:
+        '200':
+          description: Paginated convergence results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  runId:
+                    type: string
+                  networkId:
+                    type: string
+                  finalRound:
+                    type: integer
+                  consensus:
+                    type: boolean
+                  agentCount:
+                    type: integer
+                    description: Total agents in the network
+                  offset:
+                    type: integer
+                  limit:
+                    type: integer
+                  agents:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        index:
+                          type: integer
+                        name:
+                          type: string
+                          nullable: true
+                        finalBelief:
+                          type: number
+                          format: float
+                        publicBelief:
+                          type: number
+                          format: float
+        '202':
+          description: Results not yet available — retry after `network_converged` event
+        '403':
+          description: Forbidden
+        '404':
+          description: Run not found
+
+  /simulations/{runId}/networks/{networkId}/frames:
+    get:
+      tags: [Simulations]
+      summary: Replay persisted WS frames
+      description: |
+        Returns binary frames byte-for-byte identical to what the WebSocket emits, so a client
+        can reuse its WS parser. Requires the run to have been created with `persistFrames=true`.
+        Owner or Administrator only.
+
+        Query forms (mutually exclusive):
+        - `?round=N` — single round
+        - `?round=last` — most recent persisted round
+        - `?from=A&to=B` — inclusive range, capped at **1000 rounds per request**
+
+        Returns `404 frames_not_persisted` if `persistFrames=false` on the run, if the requested
+        rounds were never emitted, or if ephemeral frames already expired.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: networkId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: round
+          in: query
+          schema:
+            oneOf:
+              - type: integer
+              - type: string
+                enum: [last]
+        - name: from
+          in: query
+          schema:
+            type: integer
+        - name: to
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: |
+            Concatenation of WS slices ordered by `(round, starts_at)`. Each slice has the same
+            36-byte header + (publicBelief, privateBelief, speaking) payload as the WS stream.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Invalid range or `range_too_large`
+        '403':
+          description: Forbidden
+        '404':
+          description: Frames not persisted or expired
+
+  # ── WebSocket ──────────────────────────────────────────────────────────────
+
+  /ws:
+    get:
+      tags: [WebSocket]
+      summary: Persistent authenticated WebSocket
+      description: |
+        Upgrades the connection to a single persistent WebSocket per user session.
+        Open once at login; keep it alive for the entire session.
+
+        ## Handshake (client → server, first message)
+
+        Auth must be the very first message. The server closes the connection if it
+        receives anything else or if the token is invalid.
+
+        ```json
+        {"type": "auth", "token": "<Firebase idToken>"}
+        ```
+
+        Server responds (server → client):
+        ```json
+        {"type": "auth_ok", "userId": "<uid>"}
+        ```
+        or on failure:
+        ```json
+        {"type": "error", "code": "auth_failed"}
+        ```
+
+        ## Subscribe to a run (client → server)
+
+        Send after `POST /simulations/generated` or `POST /simulations/custom` returns `runId`.
+        Can be sent before the simulation starts — **this eliminates the race condition**.
+
+        ```json
+        {"type": "subscribe", "runId": "<runId>"}
+        ```
+
+        **Replay buffer.** The server keeps every event emitted for a run (control events and
+        binary frames, in original wire order) in an in-memory buffer keyed by `runId`. On
+        subscribe the buffer is drained to the client before live events flow, so a subscriber
+        joining mid-run or just after `run_completed` sees the full sequence — including
+        `network_started` and any binary frames already emitted. The buffer is evicted 60
+        minutes after the run reaches a terminal state, after which the server falls back to
+        a DB-backed replay.
+
+        **If the run is still running:** the server registers the connection, drains the
+        buffer (any events emitted before subscribe), and live events continue to flow.
+
+        **If the run is already completed:** the buffer drain delivers the full sequence
+        in the same order as live emission — see "Live event order per network" below.
+        After 60 minutes the buffer is gone and the server falls back to DB replay
+        (`topology_ready` → `network_started` → frame binaries if `persistFrames=true` →
+        `network_converged` → `run_completed`; the topology binary is **not** replayed from
+        DB — fetch it via `GET /topology` if you need it).
+
+        **If the run does not exist:**
+        ```json
+        {"type": "error", "code": "run_not_found", "runId": "<runId>"}
+        ```
+
+        ## Unsubscribe (client → server)
+
+        ```json
+        {"type": "unsubscribe", "runId": "<runId>"}
+        ```
+
+        ## Live event order per network
+
+        For each network in the run, in this exact order:
+
+        1. **Topology binary** (one frame, 32-byte header) — full adjacency in CSR layout.
+        2. `topology_ready` JSON event.
+        3. `network_started` JSON event.
+        4. **Frame binary** (one per `AgentProcessor` per round, 36-byte header) — repeated
+           until convergence or iteration limit.
+        5. `network_converged` JSON event.
+
+        After every network finishes, the run emits `run_completed`.
+
+        ## Control events (server → client, JSON text frames)
+
+        ```json
+        {"event": "topology_ready",    "runId": "...", "networkId": "..."}
+        {"event": "network_started",   "runId": "...", "networkId": "..."}
+        {"event": "network_converged", "runId": "...", "networkId": "...", "round": 10, "consensus": true}
+        {"event": "run_completed",     "runId": "..."}
+        ```
+
+        On `topology_ready`, the network topology is already in your buffer as the preceding
+        binary message; you can also fetch it via `GET /simulations/{runId}/networks/{networkId}/topology`
+        if you missed it.
+
+        ## Topology binary (server → client, one per network)
+
+        Full adjacency snapshot in CSR (Compressed Sparse Row) layout. Emitted once per
+        network, immediately before `topology_ready`. Little-endian throughout.
+
+        ```
+        Header (32 bytes):
+          0-7    int64    networkId.mostSigBits
+          8-15   int64    networkId.leastSigBits
+          16-23  int64    runId             (Snowflake ID — read with BigInt on JS)
+          24-27  int32    numberOfAgents    (= n)
+          28-31  int32    numberOfNeighbors (= m, sum of all per-agent degrees)
+
+        Body:
+          indexOffset      n × int32    — cumulative neighbor counts. The neighbors of
+                                          agent i live at body indices
+                                          [indexOffset(i-1), indexOffset(i))
+                                          (or [0, indexOffset(0)) for i=0).
+          neighborsRefs    m × int32    — target agent indices, ordered by source.
+          neighborsWeights m × float32  — connection weight (influence) per edge.
+          neighborBiases   m × uint8    — cognitive bias enum per edge.
+        ```
+
+        Total: `32 + n*4 + m*9` bytes.
+
+        ## Frame binary (server → client, one per AgentProcessor partition per round)
+
+        Agent belief state per round, little-endian. Wire format is identical to the
+        data returned by `GET /simulations/{runId}/networks/{networkId}/frames` — the
+        same parser handles both.
+
+        ```
+        Header (36 bytes):
+          0-7    int64    networkId.mostSigBits
+          8-15   int64    networkId.leastSigBits
+          16-23  int64    runId           (Snowflake ID — read with BigInt on JS)
+          24-27  int32    numberOfAgents  (agents in this partition)
+          28-31  int32    round
+          32-35  int32    startsAt        (index of the first agent in this partition)
+
+        Belief data (numberOfAgents × 8 bytes):
+          [publicBelief (float32), privateBelief (float32)] × n
+
+        Speaking data (numberOfAgents × 1 byte):
+          [isSpeaking (uint8)] × n
+        ```
+
+        Total per frame: `36 + 9 × numberOfAgents` bytes.
+
+        **Partitioning.** One round may emit multiple frame binaries with different `startsAt`
+        values (one per `AgentProcessor` actor). Each frame covers `[startsAt, startsAt + numberOfAgents)`.
+        Merge partitions by `(runId, networkId, round)` before treating a round as complete.
+
+        ## Discriminating binaries
+
+        Both topology and frame share the same WS channel. Discriminate by header bytes
+        24-27 vs 28-31, or by total payload size:
+
+        - Topology frame: `numberOfAgents` at bytes 24-27, `numberOfNeighbors` at 28-31. The
+          payload after the 32-byte header is `n*4 + m*9` bytes.
+        - Round frame: `numberOfAgents` at bytes 24-27, `round` at 28-31, `startsAt` at 32-35.
+          The payload after the 36-byte header is `9 × numberOfAgents` bytes.
+
+        A simple discriminator: if total bytes equals `36 + 9 × numberOfAgents` it's a round
+        frame; otherwise it's the topology frame for that network. In practice, the topology
+        always arrives once, immediately before `topology_ready`.
+
+        **Multiplexing with JSON.** Binary and JSON frames share the same connection.
+        Discriminate by `typeof event.data`: `"string"` → JSON control event; otherwise →
+        binary (topology or round frame).
+
+        **Bandwidth example.** 100 k agents at 30 Hz, 4 partitions of 25 k:
+        `4 × (36 + 9 × 25 000) ≈ 900 KB/s` of round frames.
+
+        ## Reconnect
+
+        On reconnect: re-send `auth`, then re-subscribe to any active runs.
+        The server replays topology and (if `persistFrames`) frames from the point of reconnect.
+
+        ## Multiple tabs
+
+        Each tab opens its own WebSocket connection. The server tracks all connections for a user
+        independently; each manages its own subscription set.
+      security: []
+      responses:
+        '101':
+          description: Switching Protocols — WebSocket connection established
+        '400':
+          description: Not a WebSocket upgrade request
+
+  # ── Legacy ─────────────────────────────────────────────────────────────────
+
+  /run:
+    post:
+      tags: [Legacy]
+      deprecated: true
+      summary: "[Deprecated] Start generated run — binary protocol"
+      description: |
+        Use `POST /simulations/generated` instead.
+        Responses include `Deprecation`, `Sunset` (2026-09-01), `Link`, and `Warning` headers.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      security: []
+      responses:
+        '200':
+          description: Run ID as plain string
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: Snowflake run ID
+
+  /custom:
+    post:
+      tags: [Legacy]
+      deprecated: true
+      summary: "[Deprecated] Start custom run — binary protocol"
+      description: Use `POST /simulations/custom` instead.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      security: []
+      responses:
+        '200':
+          description: Run ID as plain string
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: Snowflake run ID
