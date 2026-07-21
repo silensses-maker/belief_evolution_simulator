@@ -1,0 +1,103 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Compose de PRODUCCIÓN (servidor LIPN) — consume imágenes de Docker Hub.
+# El server NO clona los repos: GitHub Actions buildea y pushea las imágenes,
+# y el pipeline del LIPN solo hace pull + up.
+#
+# Instalación en el server (una sola vez), en una carpeta cualquiera:
+#   - este archivo (puede renombrarse a docker-compose.yml)
+#   - un .env creado a partir de .env.example (mismo directorio)
+#   - el JSON del service account de Firebase (ruta en FIREBASE_SA_HOST_PATH)
+#
+# Comando del pipeline en cada deploy:
+#   docker compose -f docker-compose.prod.yml pull && \
+#   docker compose -f docker-compose.prod.yml up -d
+# (pull_policy: always hace que un simple `up -d --pull always` también sirva)
+#
+# Puertos hacia el reverse proxy de la universidad:
+#   /    → localhost:3000  (frontend)
+#   /api → localhost:9000  (backend)  ← necesita headers de Upgrade para /api/ws
+# ══════════════════════════════════════════════════════════════════════════════
+
+services:
+  postgres:
+    image: silenssesmaker/bes-postgres:latest
+    pull_policy: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB_LEGACY: ${POSTGRES_DB_LEGACY}
+      POSTGRES_USER_LEGACY: ${POSTGRES_USER_LEGACY}
+      POSTGRES_PASSWORD_LEGACY: ${POSTGRES_PASSWORD_LEGACY}
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  backend:
+    image: silenssesmaker/bes-backend:latest
+    pull_policy: always
+    environment:
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_HOST_LEGACY: ${DB_HOST_LEGACY}
+      DB_PORT_LEGACY: ${DB_PORT_LEGACY}
+      DB_NAME_LEGACY: ${POSTGRES_DB_LEGACY}
+      DB_USER_LEGACY: ${POSTGRES_USER_LEGACY}
+      DB_PASSWORD_LEGACY: ${POSTGRES_PASSWORD_LEGACY}
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "9000"
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/firebase-sa.json
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID}
+      BOOTSTRAP_ADMIN_EMAILS: ${BOOTSTRAP_ADMIN_EMAILS}
+      APP_SKIP_DATABASE: ${APP_SKIP_DATABASE}
+      APP_SERVER_MODE: ${APP_SERVER_MODE}
+      APP_LOCAL_MODE: ${APP_LOCAL_MODE}
+      APP_LEGACY_DB: ${APP_LEGACY_DB}
+      APP_SERVER_LOGS: ${APP_SERVER_LOGS}
+      APP_GENERAL_LOGS: ${APP_GENERAL_LOGS}
+      APP_SIMULATION_LOGS: ${APP_SIMULATION_LOGS}
+      APP_SKIP_WS: ${APP_SKIP_WS}
+      JAVA_OPTS: ${BACKEND_JAVA_OPTS:-}
+    volumes:
+      # Ruta ABSOLUTA en el server al JSON del service account de Firebase.
+      # Sin este archivo, toda autenticación (REST y websocket) falla.
+      - ${FIREBASE_SA_HOST_PATH}:/secrets/firebase-sa.json:ro
+    ports:
+      - "9000:9000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  frontend:
+    image: silenssesmaker/bes-frontend:latest
+    pull_policy: always
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge
