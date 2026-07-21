@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A scalable, high-performance simulator for studying opinion dynamics in social networks considering different social phenomenons. 
-This implementation is based on our paper "The Spiral of Silence in Multi-Agent DeGroot models" where we examine how silence behaviors impact consensus formation in social networks.
+This implementation is based on our paper "The Spiral of Silence in Multi-Agent DeGroot models" where we examine how silence behaviors impact consensus formation in social networks. 
 
 ## Overview
 
