@@ -707,7 +707,11 @@ object Server {
             }
         }
         
-        val routes: Route = corsHandler ~ webSocketRoute ~ apiRoute ~ userRoutes ~ simulationRoutes ~ docsRoute ~ homeRoute
+        val baseRoutes: Route = corsHandler ~ webSocketRoute ~ apiRoute ~ userRoutes ~ simulationRoutes ~ docsRoute ~ homeRoute
+        // Dual-mount: el reverse proxy del LIPN expone el backend bajo /api y
+        // no controlamos si strippea el prefijo — aceptamos ambas formas
+        // (/ws y /api/ws, /simulations y /api/simulations, etc.).
+        val routes: Route = baseRoutes ~ pathPrefix("api")(baseRoutes)
         val bindingFuture = Http().newServerAt(serverHost, serverPort).bind(routes)
         
         bindingFuture.onComplete {

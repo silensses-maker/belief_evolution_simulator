@@ -1,4 +1,5 @@
-FROM eclipse-temurin:21-jdk-noble
+# ── Stage 1: build (sbt stage genera la app empaquetada) ─────────────────────
+FROM eclipse-temurin:21-jdk-noble AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -18,21 +19,28 @@ RUN echo "deb https://repo.scala-sbt.org/scalasbt/debian all main" | tee /etc/ap
     apt-get install -y sbt && \
     rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -u 1001 appuser && \
-    mkdir -p /app && \
-    chown appuser:appuser /app
-
 WORKDIR /app
 
-USER appuser
-
-COPY --chown=appuser:appuser build.sbt .
-COPY --chown=appuser:appuser project/ project/
-
+# Cachear dependencias antes de copiar el código
+COPY build.sbt .
+COPY project/ project/
 RUN sbt update
 
-COPY --chown=appuser:appuser src/ src/
+COPY src/ src/
+RUN sbt stage
+
+# ── Stage 2: runtime (solo JRE, arranque en segundos) ────────────────────────
+FROM eclipse-temurin:21-jre-noble
+
+RUN useradd -m -u 1001 appuser
+
+WORKDIR /app
+USER appuser
+
+COPY --from=builder --chown=appuser:appuser /app/target/universal/stage /app
 
 EXPOSE 9000
 
-CMD ["sbt", "-J--add-modules=jdk.incubator.vector", "-J--enable-preview", "run"]
+# Heap y flags extra se pueden pasar via JAVA_OPTS (lo respeta el script de
+# native-packager), p.ej. JAVA_OPTS="-Xmx8g" en docker-compose.
+CMD ["/app/bin/extended_model", "-J--add-modules=jdk.incubator.vector", "-J--enable-preview"]

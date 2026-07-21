@@ -16,6 +16,13 @@ services:
       - postgres_data:/var/lib/postgresql/data
     networks:
       - app-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   backend:
     build:
@@ -32,9 +39,11 @@ services:
       DB_NAME_LEGACY: ${POSTGRES_DB_LEGACY}
       DB_USER_LEGACY: ${POSTGRES_USER_LEGACY}
       DB_PASSWORD_LEGACY: ${POSTGRES_PASSWORD_LEGACY}
-      SERVER_HOST: ${SERVER_HOST}
-      SERVER_PORT: ${SERVER_PORT}
-      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS}
+      # Fijos (no dependen del .env): el código default a 8080 si SERVER_PORT
+      # falta, y el mapeo de puertos de abajo asume 9000.
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "9000"
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/firebase-sa.json
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID}
       BOOTSTRAP_ADMIN_EMAILS: ${BOOTSTRAP_ADMIN_EMAILS}
       APP_SKIP_DATABASE: ${APP_SKIP_DATABASE}
@@ -45,25 +54,38 @@ services:
       APP_GENERAL_LOGS: ${APP_GENERAL_LOGS}
       APP_SIMULATION_LOGS: ${APP_SIMULATION_LOGS}
       APP_SKIP_WS: ${APP_SKIP_WS}
+      # Heap/flags de la JVM, p.ej. BACKEND_JAVA_OPTS=-Xmx8g
+      JAVA_OPTS: ${BACKEND_JAVA_OPTS:-}
     volumes:
-      - /home/krud3/secrets/firebase-bes-sa.json:/secrets/firebase-sa.json:ro
+      # Ruta al JSON del service account de Firebase EN LA MÁQUINA HOST.
+      # Definir FIREBASE_SA_HOST_PATH en el .env (ver .env.example).
+      - ${FIREBASE_SA_HOST_PATH}:/secrets/firebase-sa.json:ro
     ports:
       - "9000:9000"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - app-network
+    restart: unless-stopped
 
-#  frontend:
-#    build:
-#      context: ./frontend
-#      dockerfile: Dockerfile
-#    ports:
-#      - "3000:3000"
-#    depends_on:
-#      - backend
-#    networks:
-#      - app-network
+  frontend:
+    build:
+      # El repo front_BES clonado como hermano de este repo.
+      context: ../front_BES
+      dockerfile: Dockerfile
+      args:
+        # Solo se pasa si está definida en el .env (backend en otro origen);
+        # sin definir, el front usa /api relativo (ver .env.example).
+        - PUBLIC_BACKEND_URL
+    ports:
+      # El proxy de la universidad rutea / → localhost:3000 (nginx interno en 80).
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    restart: unless-stopped
 
 volumes:
   postgres_data:

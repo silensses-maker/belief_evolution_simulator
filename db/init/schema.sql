@@ -22,7 +22,9 @@ SET row_security = off;
 --
 
 -- Check if database exists and create if not (cannot use DO block for CREATE DATABASE)
-SELECT 'CREATE DATABASE promueva WITH TEMPLATE = template0 ENCODING = ''UTF8'' LOCALE_PROVIDER = ''libc'' LOCALE = ''English_United States.1252'''
+-- Sin LOCALE explícito: el 'English_United States.1252' anterior era un
+-- locale de Windows y rompía la creación en hosts Linux con volumen limpio.
+SELECT 'CREATE DATABASE promueva WITH TEMPLATE = template0 ENCODING = ''UTF8'''
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'promueva')\gexec
 
 -- Connect to the promueva database

@@ -14,6 +14,7 @@ javaOptions ++= Seq(
 
 // Main module
 lazy val root = (project in file("."))
+  .enablePlugins(JavaAppPackaging)
   .settings(
       name := "extended_model",
       scalacOptions ++= Seq(
