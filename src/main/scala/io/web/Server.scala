@@ -673,7 +673,11 @@ object Server {
                            |<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
                            |<script>
                            |SwaggerUIBundle({
-                           |  url: "/openapi.yaml",
+                           |  // RELATIVA a propósito: esta página se sirve como /docs (backend
+                           |  // directo) y como /api/docs (prod, detrás del reverse proxy). Con
+                           |  // "/openapi.yaml" absoluta, en prod el fetch caía en el origen raíz
+                           |  // → el SPA del front devolvía su index.html y Swagger UI quedaba vacío.
+                           |  url: "openapi.yaml",
                            |  dom_id: '#swagger-ui',
                            |  deepLinking: true,
                            |  presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
