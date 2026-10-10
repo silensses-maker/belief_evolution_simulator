@@ -2,18 +2,24 @@ package utils.rng.distributions
 
 import scala.util.Random
 
-class BimodalDistribution(peak1: Double, peak2: Double, lower: Double = 0, upper: Double = 1) {
+class BimodalDistribution(
+    peak1: Double, 
+    peak2: Double, 
+    lower: Double = 0, 
+    upper: Double = 1,
+    stdDev: Option[Double] = None
+) {
   private val random = new Random()
   private val midpoint = (peak1 + peak2) / 2
-  private val stdDev1 = (midpoint - lower) / 3
-  private val stdDev2 = (upper - midpoint) / 3
+  private val stdDev1 = stdDev.getOrElse((midpoint - lower) / 3)
+  private val stdDev2 = stdDev.getOrElse((upper - midpoint) / 3)
 
   private def clamp(value: Double, min: Double, max: Double): Double = {
     Math.max(min, Math.min(value, max))
   }
 
-  private def sampleGaussian(peak: Double, stdDev: Double): Double = {
-    clamp(peak + random.nextGaussian() * stdDev, lower, upper)
+  private def sampleGaussian(peak: Double, sDev: Double): Double = {
+    clamp(peak + random.nextGaussian() * sDev, lower, upper)
   }
 
   def sample(): Double = {

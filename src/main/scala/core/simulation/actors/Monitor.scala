@@ -68,7 +68,8 @@ case class CoevolutionConfig(
     pCreate: Float,
     rewiringStrategy: Int,                  // 0 = Proposal A (Uniform), 1 = Proposal B (Homophily)
     assortivityStopThreshold: Float = 1.1f, // >1 = disabled; e.g. 0.95 stops when r^t >= threshold
-    fragmentationStop: Boolean = false      // true = stop as soon as Phi_t > 0 (any SCC split)
+    fragmentationStop: Boolean = false,     // true = stop as soon as Phi_t > 0 (any SCC split)
+    asymmetricTolerance: Option[(Float, Float, Float)] = None // (hubTol, periphTol, hubFraction)
 )
 
 // Messages
@@ -170,7 +171,7 @@ class Monitor extends Actor {
                 1,
                 customInfo.agentBeliefs.length,
                 customInfo.iterationLimit,
-                0,
+                customInfo.seed,
                 customInfo.stopThreshold,
                 customInfo.coevolutionConfig,
                 customInfo.persistFrames

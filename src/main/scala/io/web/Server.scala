@@ -109,7 +109,8 @@ case class CustomRunInfo(
     influences: Array[Float],
     bias: Array[Bias],
     coevolutionConfig: Option[CoevolutionConfig] = None,
-    persistFrames: Boolean = false
+    persistFrames: Boolean = false,
+    seed: Long = 0L // RNG seed for coevolution; 0 keeps the previous behaviour of custom runs
 )
 
 /**

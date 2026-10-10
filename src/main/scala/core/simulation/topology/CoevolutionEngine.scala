@@ -110,20 +110,15 @@ object CoevolutionEngine {
 
             if (lostWeightSum > 0f) {
                 if (newCandidates.isEmpty) {
-                    // Fallback: Isolation — redirect lost weight to self-loop
-                    var foundSelf = false
+                    // Fallback: Isolation (eq:aislamiento) — the lost weight returns to self-influence.
+                    // Self-influence is implicit (1 - sum of explicit weights), so dropping the broken edges
+                    // already gives I_ii^{t+1} = I_ii^t + W_lost. Only an explicit self-edge, if the network
+                    // has one (custom runs), receives the weight; no new self-edge is created, so the agent
+                    // never counts itself in the silence majority test.
                     var idx = startOfNewAgentIdx
                     while (idx < newNeighborsRefs.length) {
-                        if (newNeighborsRefs(idx) == i) {
-                            newNeighborsWeights(idx) += lostWeightSum
-                            foundSelf = true
-                        }
+                        if (newNeighborsRefs(idx) == i) newNeighborsWeights(idx) += lostWeightSum
                         idx += 1
-                    }
-                    if (!foundSelf) {
-                        newNeighborsRefs.addOne(i)
-                        newNeighborsWeights.addOne(lostWeightSum)
-                        newNeighborBiases.addOne(CognitiveBiases.DEGROOT)
                     }
                 } else {
                     if (rewiringStrategy == 0) {
@@ -176,13 +171,18 @@ object CoevolutionEngine {
                 val endIdx = newNeighborsRefs.length
                 val similarities = new Array[Float](endIdx - startOfNewAgentIdx)
                 var similaritySum = 0f
+                var hasExplicitSelf = false
                 var idx = startOfNewAgentIdx
                 while (idx < endIdx) {
                     val sim = 1f - math.abs(beliefs(newNeighborsRefs(idx)) - beliefs(i))
                     similarities(idx - startOfNewAgentIdx) = sim
                     similaritySum += sim
+                    if (newNeighborsRefs(idx) == i) hasExplicitSelf = true
                     idx += 1
                 }
+                // eq:propuesta_c normalizes over N_i^{t+1} ∪ {i} with S_ii = 1. When self-influence is implicit,
+                // add its similarity to the denominator so it keeps I_ii^{t+1} = 1 / Σ S instead of dropping to 0.
+                if (!hasExplicitSelf) similaritySum += 1f
 
                 // Assign renormalized weights; fall back to uniform if all similarities are zero
                 idx = startOfNewAgentIdx

@@ -387,6 +387,22 @@ class Network(networkId: UUID, runMetadata: RunMetadata,
                 i += 1
             }
             
+            // Asymmetric tolerance override if configured
+            runMetadata.coevolutionConfig.flatMap(_.asymmetricTolerance).foreach { case (hubTol, periphTol, hubFrac) =>
+                val hubCount = math.max(density + 1, (runMetadata.agentsPerNetwork * hubFrac).toInt)
+                var a = 0
+                while (a < runMetadata.agentsPerNetwork) {
+                    if (a < hubCount) {
+                        tolRadius(a) = hubTol
+                        tolOffset(a) = hubTol / 2f
+                    } else {
+                        tolRadius(a) = periphTol
+                        tolOffset(a) = periphTol / 2f
+                    }
+                    a += 1
+                }
+            }
+
             // ============================================================================
             // FINALIZATION
             // ============================================================================

@@ -7,12 +7,14 @@ package core.simulation.topology
  * detects polarisation states that the global-consensus threshold cannot capture:
  *
  *   1. Opinion Assortativity r^t — weighted Pearson correlation of source/target
- *      beliefs on all directed edges.  r^t → 1 signals perfect echo-chamber
- *      segregation (Section: Asortatividad Dirigida de Opinión).
+ *      beliefs on the directed influence edges (self-influence excluded).
+ *      r^t → 1 signals perfect echo-chamber segregation
+ *      (Section: Asortatividad Dirigida de Opinión).
  *
  *   2. Fragmentation Index Φ_t — normalised SCC count.  Φ_t > 0 means the
- *      network has fractured and global consensus is mathematically impossible
- *      (Section: Índice de Fragmentación).
+ *      network has split into several strongly connected components; global
+ *      consensus is still possible only if exactly one of them receives no arcs
+ *      from the others (Section: Índice de Fragmentación).
  *
  * All methods are allocation-light and operate directly on the Network actor's
  * CSR arrays so no data is copied from the hot path.
@@ -25,18 +27,19 @@ package core.simulation.topology
 object ConvergenceMetrics {
 
     /**
-     * Weighted Pearson opinion assortativity r^t ∈ [-1, 1].
+     * Weighted Pearson opinion assortativity r^t ∈ [-1, 1] over the influence edges j → i with j ≠ i
+     * (self-influence is not an edge between two agents, so it is excluded, as in Newman's definition).
      *
-     * Exploiting the DeGroot stochastic property (Σ_j I_ji = 1 ∀ i):
-     *   μ_out = (1/N) Σ_i Σ_j I_ji · B_j   (mean weighted-average belief)
-     *   μ_in  = (1/N) Σ_i B_i               (mean belief, by stochasticity)
+     *   W     = Σ_i Σ_{j≠i} I_ji
+     *   μ_out = (1/W) Σ_i Σ_{j≠i} I_ji · B_j      (weighted mean belief of emitters)
+     *   μ_in  = (1/W) Σ_i Σ_{j≠i} I_ji · B_i      (weighted mean belief of receivers)
      *
-     * Then:
-     *   r^t = Σ_ij I_ji (B_j − μ_out)(B_i − μ_in)
-     *         ─────────────────────────────────────────────────────────
-     *         √[Σ_ij I_ji (B_j − μ_out)²] · √[Σ_ij I_ji (B_i − μ_in)²]
+     *   r^t = Σ_i Σ_{j≠i} I_ji (B_j − μ_out)(B_i − μ_in)
+     *         ───────────────────────────────────────────────────────────────────
+     *         √[Σ_i Σ_{j≠i} I_ji (B_j − μ_out)²] · √[Σ_i Σ_{j≠i} I_ji (B_i − μ_in)²]
      *
-     * Returns Float.NaN when the denominator is zero (uniform beliefs or no edges).
+     * Accumulated in double precision. Returns Float.NaN when the denominator is zero
+     * (uniform beliefs, e.g. at consensus, or no edges).
      *
      * @param beliefs  The current public belief buffer (most-recently written buffer).
      */
@@ -47,28 +50,35 @@ object ConvergenceMetrics {
         neighborsWeights: Array[Float],
         beliefs: Array[Float]
     ): Float = {
-        // --- Pass 1: compute weighted means ---
-        var muIn  = 0f
-        var muOut = 0f
+        // --- Pass 1: weighted means over edges j != i ---
+        var totalW = 0.0
+        var muIn   = 0.0
+        var muOut  = 0.0
         var i = 0
         while (i < numAgents) {
-            muIn += beliefs(i)
             val start = if (i == 0) 0 else indexOffset(i - 1)
             val end   = indexOffset(i)
             var k = start
             while (k < end) {
-                muOut += neighborsWeights(k) * beliefs(neighborsRefs(k))
+                val j = neighborsRefs(k)
+                if (j != i) {
+                    val w = neighborsWeights(k).toDouble
+                    totalW += w
+                    muOut  += w * beliefs(j)
+                    muIn   += w * beliefs(i)
+                }
                 k += 1
             }
             i += 1
         }
-        muIn  /= numAgents
-        muOut /= numAgents
+        if (totalW == 0.0) return Float.NaN
+        muIn  /= totalW
+        muOut /= totalW
 
         // --- Pass 2: Pearson numerator and denominator terms ---
-        var num    = 0f
-        var denom1 = 0f // sum w * (B_source - μ_out)^2
-        var denom2 = 0f // sum w * (B_target - μ_in )^2
+        var num    = 0.0
+        var denom1 = 0.0 // Σ w (B_source − μ_out)²
+        var denom2 = 0.0 // Σ w (B_target − μ_in)²
         i = 0
         while (i < numAgents) {
             val bTarget = beliefs(i) - muIn
@@ -76,18 +86,21 @@ object ConvergenceMetrics {
             val end   = indexOffset(i)
             var k = start
             while (k < end) {
-                val w       = neighborsWeights(k)
-                val bSource = beliefs(neighborsRefs(k)) - muOut
-                num    += w * bSource * bTarget
-                denom1 += w * bSource * bSource
-                denom2 += w * bTarget * bTarget
+                val j = neighborsRefs(k)
+                if (j != i) {
+                    val w       = neighborsWeights(k).toDouble
+                    val bSource = beliefs(j) - muOut
+                    num    += w * bSource * bTarget
+                    denom1 += w * bSource * bSource
+                    denom2 += w * bTarget * bTarget
+                }
                 k += 1
             }
             i += 1
         }
 
-        val denom = math.sqrt(denom1.toDouble * denom2.toDouble).toFloat
-        if (denom == 0f) Float.NaN else num / denom
+        val denom = math.sqrt(denom1 * denom2)
+        if (denom == 0.0) Float.NaN else (num / denom).toFloat
     }
 
     /**

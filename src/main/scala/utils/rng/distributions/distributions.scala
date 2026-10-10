@@ -20,10 +20,14 @@ case class Exponential(lambda: Double) extends Distribution {
     override def toString: String = s"exponential(lambda=$lambda)"
 }
 
-case class BiModal(peak1: Double, peak2: Double, lower: Double = 0, upper: Double = 1) extends Distribution {
+case class BiModal(peak1: Double, peak2: Double, lower: Double = 0, upper: Double = 1, stdDev: Option[Double] = None) extends Distribution {
     override def toString: String = s"biModal(peak1=$peak1, peak2=$peak2, lower=$lower, upper=$upper)"
     
-    val bimodalDistribution: BimodalDistribution = BimodalDistribution(peak1, peak2, lower, upper)
+    val bimodalDistribution: BimodalDistribution = new BimodalDistribution(peak1, peak2, lower, upper, stdDev)
+}
+
+case class RadicalMinority(majorityBelief: Double = 0.5, radicalBelief: Double = 1.0, radicalFraction: Double = 0.1, stdDev: Double = 0.02) extends Distribution {
+    override def toString: String = s"radicalMinority(maj=$majorityBelief, rad=$radicalBelief, frac=$radicalFraction)"
 }
 
 object Distribution {
@@ -37,7 +41,9 @@ object Distribution {
             val param = str.stripPrefix("exponential(lambda=").stripSuffix(")")
             Some(Exponential(param.toDouble))
         case str if str.startsWith("biModal") =>
-            None
+            Some(BiModal(0.25, 0.75))
+        case str if str.startsWith("radicalMinority") =>
+            Some(RadicalMinority())
         case _ => None
     }
 }

@@ -213,7 +213,9 @@ class AgentProcessor(
             val lower = tolOffset(i)
             val initialBelief = belief(i)
             var j = if (i > 0) indexOffset(i - 1) else 0
-            val currentBias = neighborBiases(j)
+            // An agent can be left without explicit neighbours after the isolation rule (only implicit
+            // self-influence remains); its neighbour loops are empty, so any bias value is safe here.
+            val currentBias = if (j < indexOffset(i)) neighborBiases(j) else CognitiveBiases.DEGROOT
             val skipSIMD = canSIMD.contains(i) // Skips SIMD if agents have neighbors with multiple different biases
             val endLoopSIMD = indexOffset(i) - speciesLength
             
@@ -546,15 +548,48 @@ class AgentProcessor(
                 }
             
             case Normal(mean, std) =>
-            // ToDo Implement initialization for the Normal distribution
+                var i = startsAt
+                while (i < (startsAt + numberOfAgents)) {
+                    belief(i) = math.max(0.0f, math.min(1.0f, (mean + random.nextGaussian() * std).toFloat))
+                    i += 1
+                }
             
             case Exponential(lambda) =>
-            // ToDo Implement initialization for the Exponential distribution
+                var i = startsAt
+                while (i < (startsAt + numberOfAgents)) {
+                    val u = random.nextDouble()
+                    val expVal = -math.log(1.0 - u) / lambda
+                    belief(i) = math.max(0.0f, math.min(1.0f, expVal.toFloat))
+                    i += 1
+                }
             
-            case BiModal(peak1, peak2, lower, upper) =>
+            case bm: BiModal =>
+                val dist = new BimodalDistribution(bm.peak1, bm.peak2, bm.lower, bm.upper, bm.stdDev)
+                var i = startsAt
+                while (i < (startsAt + numberOfAgents)) {
+                    belief(i) = dist.sampleFloat()
+                    i += 1
+                }
+
+            case rm: RadicalMinority =>
+                var i = startsAt
+                while (i < (startsAt + numberOfAgents)) {
+                    if (random.nextDouble() < rm.radicalFraction) {
+                        belief(i) = math.max(0.0f, math.min(1.0f, (rm.radicalBelief + random.nextGaussian() * rm.stdDev).toFloat))
+                    } else {
+                        belief(i) = math.max(0.0f, math.min(1.0f, (rm.majorityBelief + random.nextGaussian() * rm.stdDev).toFloat))
+                    }
+                    i += 1
+                }
             
+            case CustomDistribution => () // beliefs were already copied from CustomRunInfo by Network
+
             case _ =>
-            
+                var i = startsAt
+                while (i < (startsAt + numberOfAgents)) {
+                    belief(i) = random.nextFloat()
+                    i += 1
+                }
         }
     }
 }
