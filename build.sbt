@@ -58,3 +58,7 @@ libraryDependencies ++= Seq(
 
 // Firebase
 libraryDependencies += "com.google.firebase" % "firebase-admin" % "9.5.0"
+
+// Tests (thesis: coevolution engine and structural metrics)
+libraryDependencies += "org.scalameta" %% "munit" % "1.0.2" % Test
+Test / javaOptions := Seq("-Xmx2g", "--add-modules=jdk.incubator.vector")

@@ -30,6 +30,7 @@ project/plugins/project/
 # project specific
 /src/data
 *.csv
+!results/**/*.csv
 *.gif
 *.svg
 .env

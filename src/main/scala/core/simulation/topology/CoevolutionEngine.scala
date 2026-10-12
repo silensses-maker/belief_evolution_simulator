@@ -5,6 +5,34 @@ import core.model.agent.behavior.bias.CognitiveBiases.Bias
 import scala.collection.mutable.ArrayBuffer
 import scala.util.Random
 
+/**
+ * Coevolution engine: one round of adaptive rewiring of the influence matrix (thesis Ch. 3, Algorithm 3.1).
+ *
+ * The engine is a pure function over the Network actor's CSR arrays; it is only called when the run has a
+ * `CoevolutionConfig`, so static (original SOM) runs never reach it.
+ *
+ * CSR convention: the incoming influences of agent i are stored in positions
+ * `[indexOffset(i-1), indexOffset(i))` of `neighborsRefs` / `neighborsWeights` (edge j -> i with weight I_ji).
+ * Self-influence is implicit: I_ii = 1 - sum of the explicit weights of row i.
+ *
+ * For each agent i:
+ *  1. Rupture. Each visible neighbour j is compared with i: a speaking neighbour by its belief, a silent SOM+
+ *     neighbour by its last public opinion; a silent SOM- neighbour is not evaluated. If the distance d exceeds
+ *     tau_i, the edge breaks with probability pBreak * g, where g = 1 - exp(1 - d / tau_i).
+ *  2. Bounded creation. Every non-neighbour k with |B_k - B_i| <= tau_i becomes a new contact with probability
+ *     pCreate (full O(N) scan).
+ *  3. Redistribution, preserving the row-stochastic invariant:
+ *     - weight lost and no new contact: isolation rule, the lost weight returns to the implicit self-influence;
+ *     - weight lost and new contacts: Propuesta A (rewiringStrategy = 0) splits it equally,
+ *       Propuesta B (rewiringStrategy = 1) in proportion to the similarity 1 - |B_k - B_i|;
+ *     - nothing lost but new contacts: Propuesta C renormalizes the whole neighbourhood, including the implicit
+ *       self-influence with similarity 1.
+ *
+ * Tested in `CoevolutionEngineSuite` (src/test/scala).
+ *
+ * @param random seeded per round by the caller (`seed + round`) so runs are reproducible
+ * @return the new (indexOffset, neighborsRefs, neighborsWeights, neighborBiases)
+ */
 object CoevolutionEngine {
 
     def evolveTopology(

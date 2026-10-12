@@ -1,0 +1,37 @@
+PopulationSize,Scenario,RunID,TotalDurationMs,ConsensusCount,AvgRounds
+64,Baseline (Static),91,357,3,17.0
+64,Scenario A (Pure Creation, Prop C),92,56,3,10.0
+64,Scenario B (Uniform, Prop A),93,68,3,10.666667
+64,Scenario B (Homophilic, Prop B),94,29,3,10.333333
+128,Baseline (Static),95,35,3,17.333334
+128,Scenario A (Pure Creation, Prop C),96,52,3,9.666667
+128,Scenario B (Uniform, Prop A),97,73,3,9.333333
+128,Scenario B (Homophilic, Prop B),98,79,3,9.0
+256,Baseline (Static),99,55,3,19.333334
+256,Scenario A (Pure Creation, Prop C),100,125,3,8.333333
+256,Scenario B (Uniform, Prop A),101,110,3,8.0
+256,Scenario B (Homophilic, Prop B),102,122,3,8.333333
+512,Baseline (Static),103,114,3,20.0
+512,Scenario A (Pure Creation, Prop C),104,256,3,8.0
+512,Scenario B (Uniform, Prop A),105,208,3,8.0
+512,Scenario B (Homophilic, Prop B),106,122,3,8.0
+1024,Baseline (Static),107,124,3,23.333334
+1024,Scenario A (Pure Creation, Prop C),108,492,3,7.6666665
+1024,Scenario B (Uniform, Prop A),109,703,3,8.0
+1024,Scenario B (Homophilic, Prop B),110,374,3,7.6666665
+2048,Baseline (Static),111,254,3,23.0
+2048,Scenario A (Pure Creation, Prop C),112,839,3,8.0
+2048,Scenario B (Uniform, Prop A),113,1839,3,8.0
+2048,Scenario B (Homophilic, Prop B),114,3223,3,8.0
+4096,Baseline (Static),115,583,3,22.333334
+4096,Scenario A (Pure Creation, Prop C),116,2524,3,8.0
+4096,Scenario B (Uniform, Prop A),117,4567,3,8.0
+4096,Scenario B (Homophilic, Prop B),118,14817,3,8.0
+8192,Baseline (Static),119,2853,3,25.333334
+8192,Scenario A (Pure Creation, Prop C),120,8740,3,8.0
+8192,Scenario B (Uniform, Prop A),121,12322,3,8.0
+8192,Scenario B (Homophilic, Prop B),122,57107,3,8.333333
+16384,Baseline (Static),123,2160,3,25.666666
+16384,Scenario A (Pure Creation, Prop C),124,41049,3,8.333333
+16384,Scenario B (Uniform, Prop A),125,84835,3,8.666667
+16384,Scenario B (Homophilic, Prop B),126,199594,3,8.333333

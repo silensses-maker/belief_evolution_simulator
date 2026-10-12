@@ -35,16 +35,34 @@ Each agent can also have a different cognitive bias for each neighbor:
 
 In addition to static graphs, the simulator supports **dynamic coevolutionary topologies** where the underlying social network rewires adaptively based on agent opinions and silencing dynamics:
 
-- **Scenario A (Pure Creation - Proposal C):** Agents form new homophilic connections with probability $P_{\text{create}}$ towards candidates within their tolerance radius $\tau_i$, applying global zero-sum row normalization.
-- **Scenario B (Homophilic Rewiring - Proposal B):** Simultaneous continuous edge decay with probability $g_{ji}^t$ based on perceived opinion distance $\hat{d}_{ij}^t > \tau_i$, redistributing the lost influence mass $W_{\text{lost}}$ weighted by ideological similarity to new homophilic peers.
-- **Scenario B (Uniform Rewiring - Proposal A):** Continuous edge decay with uniform redistribution of lost influence mass across newly connected peers.
-- **Isolation Fallback (Guard Clause):** When no candidate satisfies homophilic tolerance ($\mathcal{U}_i^t = \emptyset$), the lost mass is redirected to the agent's self-influence loop ($I_{ii}$), preserving the row-stochastic invariant ($\sum_j I_{ji} = 1$).
+Each round, for every agent $i$ (`core.simulation.topology.CoevolutionEngine.evolveTopology`):
+
+- **Rupture.**
+  - A visible neighbour $j$ is compared with $i$: a speaking neighbour by its belief, a silent SOM+ neighbour by its last public opinion. A silent SOM- neighbour is not evaluated.
+  - If the distance $\hat{d}_{ij}^t$ exceeds $\tau_i$, the edge breaks with probability $P_{\text{break}} \cdot g_{ji}^t$, where $g_{ji}^t = 1 - e^{1 - \hat{d}_{ij}^t/\tau_i}$.
+- **Bounded creation.** Every non-neighbour $k$ with $|B_k - B_i| \le \tau_i$ becomes a new contact with probability $P_{\text{create}}$.
+- **Redistribution of the lost influence $W_{\text{lost}}$.** It preserves the row-stochastic invariant; self-influence is implicit, $I_{ii} = 1 - \sum_{j \ne i} I_{ji}$.
+  - **Proposal A (uniform):** the lost weight is split equally among the new contacts.
+  - **Proposal B (homophilic):** the lost weight is split in proportion to the similarity $1 - |B_k - B_i|$.
+  - **Proposal C (pure creation):** nothing was lost but contacts were created, so the whole neighbourhood is renormalized by similarity, including the implicit self-influence with similarity 1.
+  - **Isolation rule:** weight was lost and no candidate exists, so the lost weight returns to the implicit self-influence. No self-edge is created.
+
+Static runs (no `CoevolutionConfig`) never call the engine, so the original SOM models behave exactly as before.
+
+### Stopping Rules
+
+A network stops at the first of:
+
+- consensus, when $\max B - \min B < \epsilon$;
+- the iteration limit, which counts as dissensus;
+- stability, also dissensus: no belief changed by more than $\epsilon/100$ in two consecutive rounds. This rule comes from the original simulator.
+- optional structural stops: `assortivityStopThreshold` (stop when $r^t$ reaches it) and `fragmentationStop` (stop when $\Phi_t > 0$).
 
 ### Structural Convergence Metrics:
 
 During coevolutionary runs, the engine computes per-round graph invariants persisted to the relational database (`network_coevolution_metrics`):
 
-- **Weighted Opinion Assortativity ($r^t \in [-1, 1]$):** Quantifies peer homophily and modular clustering.
+- **Weighted Opinion Assortativity ($r^t \in [-1, 1]$):** a weighted Pearson correlation of emitter and receiver beliefs over the influence edges $j \ne i$. It adapts Newman's (2003) scalar assortativity to directed, weighted influence matrices; with a symmetric matrix it reduces to Eq. 6 of Djurdjevac Conrad et al. (2024). It is NaN at consensus.
 - **Normalized Fragmentation Index ($\Phi_t \in [0, 1]$):** Measures macro-level network disintegration $\Phi_t = \frac{\kappa(G_t) - 1}{N - 1}$.
 - **Component Count ($\kappa(G_t)$):** Number of strongly connected components identified at each iteration.
 
@@ -53,7 +71,7 @@ During coevolutionary runs, the engine computes per-round graph invariants persi
 ## Features
 
 - Simulate opinion dynamics in networks of up to 134* million agents ($2^{27}$)
-- High-performance coevolutionary graph rewiring for networks up to 16,384+ agents in under 26 seconds (SIMD vectorization & BitSet candidate caches)
+- Coevolutionary rewiring tested up to 16,384 agents. A full benchmark run at that size takes about 26–34 s without database persistence and 41–200 s with it. The candidate search is $O(N)$ per agent and the network densifies, so the cost grows roughly quadratically.
 - Generate networks with small-world properties and power-law degree distributions
 - Parallel computation support via Scala and Akka Actors
 - Configurable parameters:
@@ -184,25 +202,52 @@ To execute the automated parametric benchmark suite evaluating scaling performan
 sbt "runMain core.simulation.ParametricTestRunner"
 ```
 
-Results are logged directly to the console and automatically persisted to `parametric_results.csv` and the PostgreSQL database.
+Results are logged to the console and persisted to `parametric_results.csv` (git-ignored) and to the PostgreSQL database.
+
+The stress tests of the thesis:
+
+```bash
+sbt "runMain core.simulation.EdgeCaseRunner"        # phase 2: asymmetric tolerance, absolute fluidity
+sbt "runMain core.simulation.EdgeCaseRunnerPhase4"  # phase 4: resistance to consensus (ablation, sub-critical tolerance)
+```
+
+Each network's seed is `seed + runId + index`, so repeating a campaign generates new networks. The results reported in the thesis (run ids 91–139, October 2026) are in [`results/thesis_2026-10/`](results/thesis_2026-10/).
+
+## Tests
+
+```bash
+sbt test
+```
+
+`CoevolutionEngineSuite` and `ConvergenceMetricsSuite` check:
+
+- the rupture and silence rules;
+- Proposals A, B and C, and the isolation rule;
+- the row-stochastic invariant over random networks;
+- the assortativity coefficient, including its reduction to Djurdjevac Conrad et al.'s Eq. 6;
+- the SCC count and the fragmentation index.
 
 ---
 
 ## Citation
 
-If you use this simulator in your research, please cite our paper:
+If you use this simulator in your research, please cite the paper:
 
 ```bibtex
-@article{aranda2024soundsilencesocialnetworks,
-      title={The Sound of Silence in Social Networks}, 
-      author={Jesús Aranda and Juan Francisco Díaz and David Gaona and Frank Valencia},
-      year={2024},
-      eprint={2410.19685},
-      archivePrefix={arXiv},
-      primaryClass={cs.MA},
-      url={https://arxiv.org/abs/2410.19685}, 
+@inproceedings{aranda2025spiral,
+  title     = {The Spiral of Silence in Multi-Agent Models for Opinion Formation},
+  author    = {Jes{\'u}s Aranda and Juan Francisco D{\'i}az and David Gaona and Frank Valencia},
+  booktitle = {Theoretical Aspects of Computing -- ICTAC 2025},
+  series    = {Lecture Notes in Computer Science},
+  pages     = {417--434},
+  year      = {2025},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-032-11176-0_24},
+  note      = {Preprint: arXiv:2410.19685}
 }
 ```
+
+The coevolutionary extension (adaptive topology, Proposals A/B/C, structural metrics) was developed by Julián Ernesto Puyo Mora as an undergraduate thesis at Universidad del Valle (EISC), *Extensión de los Modelos de Evolución de la Opinión SOM+ y SOM− a Redes Coevolutivas* (2026).
 
 ## License
 
