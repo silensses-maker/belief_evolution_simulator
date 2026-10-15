@@ -217,7 +217,7 @@ sbt "runMain core.simulation.EdgeCaseRunner"        # phase 2: asymmetric tolera
 sbt "runMain core.simulation.EdgeCaseRunnerPhase4"  # phase 4: resistance to consensus (ablation, sub-critical tolerance)
 ```
 
-Each network's seed is `seed + runId + index`, so repeating a campaign generates new networks. The results reported in the thesis (run ids 91–139, October 2026) are in [`results/thesis_2026-10/`](results/thesis_2026-10/).
+Each network's seed is `seed + runId + index`, so repeating a campaign generates new networks. The results reported in J. E. Puyo's thesis (run ids 160–218, October 2026) are in [`results/puyo/thesis_2026-10/`](results/puyo/thesis_2026-10/). Each author keeps their datasets under `results/<author>/`.
 
 ## Tests
 
