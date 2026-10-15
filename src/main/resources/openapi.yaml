@@ -16,8 +16,14 @@ info:
     **Cognitive biases:** `0` = DEGROOT, `1` = CONFIRMATION, `2` = BACKFIRE, `3` = AUTHORITY, `4` = INSULAR
 
 servers:
+  # Relativo al origen de la página que sirve estos docs: en prod resuelve a
+  # https://silensess.lipn.univ-paris13.fr/api y en local a
+  # http://localhost:9000/api (el dual-mount de Server.scala acepta el prefijo).
+  # Sin esto, el "Try it out" de /api/docs en prod apuntaba a localhost.
+  - url: /api
+    description: Mismo origen que estos docs (prod vía reverse proxy, o local)
   - url: http://localhost:9000
-    description: Local development
+    description: Local development (backend directo, sin prefijo)
 
 components:
   securitySchemes:

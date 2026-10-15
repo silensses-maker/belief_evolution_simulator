@@ -1,0 +1,13 @@
+# Contexto compartido por Dockerfile y Dockerfile_db — NO ignorar db/
+target
+.git
+.github
+.env
+.env.*
+!.env.example
+.claude
+.context
+.bsp
+.idea
+.vscode
+*.md
