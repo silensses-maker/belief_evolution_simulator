@@ -1,0 +1,6 @@
+PopulationSize,Scenario,RunID,TotalDurationMs,ConsensusCount,AvgRounds
+512,Baseline Uniform (tau=0.10, Prop B),211,985,3,11.0
+512,Case 2A: Intolerant Hubs (Homophilic, Prop B),212,134,3,10.0
+512,Case 2A: Intolerant Hubs (Uniform, Prop A),213,3549,2,73.333336
+512,Case 2B: Absolute Fluidity (Homophilic, Prop B),214,2683,0,113.333336
+512,Case 2B: Absolute Fluidity (Uniform, Prop A),215,2854,1,88.333336

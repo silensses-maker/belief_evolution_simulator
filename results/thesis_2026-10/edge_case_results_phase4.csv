@@ -1,4 +1,4 @@
 PopulationSize,Scenario,RunID,TotalDurationMs,ConsensusCount,AvgRounds
-512,Baseline Bimodal (tau=0.20, pCreate=0.05, Prop B),137,1009,3,7.0
-512,Case A: Ablation (pCreate=0.00, tau=0.20, Prop B),138,576,3,41.333332
-512,Case B: Sub-Critical (tau=0.02, pCreate=0.05, Prop B),139,718,0,52.0
+512,Baseline Bimodal (tau=0.20, pCreate=0.05, Prop B),216,897,3,8.0
+512,Case A: Ablation (pCreate=0.00, tau=0.20, Prop B),217,955,1,92.666664
+512,Case B: Sub-Critical (tau=0.02, pCreate=0.05, Prop B),218,238,0,47.333332

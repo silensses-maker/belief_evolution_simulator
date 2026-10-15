@@ -1,6 +1,6 @@
 PopulationSize,Scenario,RunID,TotalDurationMs,ConsensusCount,AvgRounds
-512,Baseline Uniform (Homophilic),127,899,3,8.0
-512,Case 1A: Extreme Polarization (Homophilic),128,381,3,9.0
-512,Case 1A: Extreme Polarization (Uniform),129,579,3,9.666667
-512,Case 1B: Radical Minority (Homophilic),130,77,3,6.6666665
-512,Case 1B: Radical Minority (Uniform),131,296,3,6.3333335
+512,Baseline Uniform (Homophilic),196,1133,2,10.333333
+512,Case 1A: Extreme Polarization (Homophilic),197,877,1,25.666666
+512,Case 1A: Extreme Polarization (Uniform),198,1140,2,22.666666
+512,Case 1B: Radical Minority (Homophilic),199,66,3,6.3333335
+512,Case 1B: Radical Minority (Uniform),200,1010,3,6.3333335

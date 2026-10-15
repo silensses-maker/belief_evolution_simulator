@@ -72,6 +72,8 @@ class Network(networkId: UUID, runMetadata: RunMetadata,
     // ============================================================================
     val tolRadius: Array[Float] = Array.fill(runMetadata.agentsPerNetwork)(0.1f)
     val tolOffset: Array[Float] = Array.fill(runMetadata.agentsPerNetwork)(0.05f)
+    // Coevolution: symmetric radius tau_i recovered from the silence-window bounds on the first coevolution round
+    private var coevTolRadius: Array[Float] = null
     val silenceStrategy: Array[SilenceStrategy] = new Array[SilenceStrategy](runMetadata.agentsPerNetwork)
     val silenceEffect: Array[SilenceEffect] = new Array[SilenceEffect](runMetadata.agentsPerNetwork)
     val hasMemory: Array[Byte] = new Array[Byte](runMetadata.agentsPerNetwork)
@@ -498,10 +500,14 @@ class Network(networkId: UUID, runMetadata: RunMetadata,
                         case Some(config) =>
                             val currentBeliefs = if (bufferSwitch) beliefBuffer1 else beliefBuffer2
                             val currentSpeaking = if (bufferSwitch) speakingBuffer1 else speakingBuffer2
+                            // tolRadius / tolOffset hold the silence-window bounds after FirstUpdate; recover tau_i once
+                            if (coevTolRadius == null)
+                                coevTolRadius = core.simulation.topology.CoevolutionEngine.toleranceRadii(
+                                    tolRadius, tolOffset, runMetadata.agentsPerNetwork)
 
                             val (newOffsets, newRefs, newWeights, newBiases) = core.simulation.topology.CoevolutionEngine.evolveTopology(
                                 runMetadata.agentsPerNetwork, indexOffset, neighborsRefs, neighborsWeights, neighborBiases,
-                                currentBeliefs, publicBelief, currentSpeaking, hasMemory, tolRadius,
+                                currentBeliefs, publicBelief, currentSpeaking, hasMemory, coevTolRadius,
                                 config.pBreak, config.pCreate, config.rewiringStrategy,
                                 new scala.util.Random(runMetadata.seed + round) // deterministic per-round seed
                             )

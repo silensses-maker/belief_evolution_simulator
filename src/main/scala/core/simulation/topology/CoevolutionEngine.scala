@@ -30,10 +30,23 @@ import scala.util.Random
  *
  * Tested in `CoevolutionEngineSuite` (src/test/scala).
  *
+ * @param tolRadius the symmetric tolerance radius tau_i of each agent (see `toleranceRadii`)
  * @param random seeded per round by the caller (`seed + round`) so runs are reproducible
  * @return the new (indexOffset, neighborsRefs, neighborsWeights, neighborBiases)
  */
 object CoevolutionEngine {
+
+    /**
+     * Tolerance radius tau_i for the coevolution rules, recovered from SiLEnSeSS's acceptance window.
+     *
+     * Before the first round, `AgentProcessor` turns each agent's (radius r, offset o) into the bounds of its silence
+     * window, stored in the shared arrays as upper = o + r (in `tolRadius`) and lower = o - r (in `tolOffset`). The
+     * coevolution rules use the symmetric radius r = (upper - lower) / 2, which is exact for any offset and leaves the
+     * SiLEnSeSS window untouched. (Passing `upper` directly would use r + o: 0.15 instead of 0.10 with the default
+     * offset of 0.05 for generated networks.)
+     */
+    def toleranceRadii(upper: Array[Float], lower: Array[Float], numAgents: Int): Array[Float] =
+        Array.tabulate(numAgents)(i => (upper(i) - lower(i)) / 2f)
 
     def evolveTopology(
         numAgents: Int,

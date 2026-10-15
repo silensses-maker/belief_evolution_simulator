@@ -44,6 +44,17 @@ class CoevolutionEngineSuite extends munit.FunSuite {
 
     private val eps = 1e-5f
 
+    test("tolerance radius: recovered exactly from SiLEnSeSS's window bounds, for any offset") {
+        // AgentProcessor.FirstUpdate stores upper = offset + radius and lower = offset - radius
+        val radius = Array(0.10f, 0.01f, 0.50f, 0.20f, 0.02f, 0.15f)
+        val offset = Array(0.05f, 0.005f, 0.25f, 0.10f, 0.01f, 0f)
+        val upper = radius.indices.map(i => offset(i) + radius(i)).toArray
+        val lower = radius.indices.map(i => offset(i) - radius(i)).toArray
+        val tau = CoevolutionEngine.toleranceRadii(upper, lower, radius.length)
+        radius.indices.foreach(i => assertEqualsFloat(tau(i), radius(i), 1e-6f))
+        assertNotEquals(upper(0), radius(0))                            // the raw upper bound would be 0.15, not 0.10
+    }
+
     test("isolation: lost weight returns to the implicit self-influence, no self-edge is created") {
         // agent 0 listens to agent 1 (far away); nobody is within its tolerance
         val net = csr(3, Map(0 -> Seq((1, 0.4f)), 1 -> Seq((0, 0.5f)), 2 -> Seq((1, 0.5f))))

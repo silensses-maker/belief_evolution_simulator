@@ -49,6 +49,12 @@ Each round, for every agent $i$ (`core.simulation.topology.CoevolutionEngine.evo
 
 Static runs (no `CoevolutionConfig`) never call the engine, so the original SOM models behave exactly as before.
 
+**Tolerance used by the coevolution rules.**
+- Each agent has a tolerance radius $r_i$ and an offset $o_i$. Generated networks default to $r = 0.10$ and $o = 0.05$, and `asymmetricTolerance` uses $o = r/2$.
+- The original SOM silence test accepts a neighbour when $B_j - B_i \in [o_i - r_i,\ o_i + r_i]$. With the defaults that is $[-0.05, 0.15]$, an asymmetric window. This is SiLEnSeSS's own behaviour and is left unchanged.
+- Rupture and creation use the symmetric radius $	au_i = r_i$, which the coevolution hook recovers from the window bounds (`CoevolutionEngine.toleranceRadii`).
+- Before 2026-10-14 the hook passed the window's upper bound $o_i + r_i$ instead, so the effective tolerance was 1.5 × the configured radius.
+
 ### Stopping Rules
 
 A network stops at the first of:
