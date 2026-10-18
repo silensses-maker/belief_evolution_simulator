@@ -46,6 +46,16 @@ components:
 
     UsageLimits:
       type: object
+      description: |
+        Per-role quotas enforced server-side by `POST /simulations/generated` and
+        `POST /simulations/custom` (JSON and binary). `null` means unlimited.
+
+        | Role | maxAgents | maxIterations | maxNetworks | densityFactor |
+        |---|---|---|---|---|
+        | Guest | 10 | 10 | 1 | 0.5 |
+        | BaseUser | 100 | 100 | 5 | 0.5 |
+        | Researcher | 1000 | 1000 | 20 | 0.75 |
+        | Administrator | null | null | null | 1.0 |
       properties:
         maxAgents:
           type: integer
@@ -56,6 +66,11 @@ components:
         densityFactor:
           type: number
           format: float
+        maxNetworks:
+          type: integer
+          nullable: true
+          description: |
+            Maximum `numberOfNetworks` of a generated run. Custom runs are always a single network.
 
     UserInfo:
       type: object
@@ -131,6 +146,13 @@ components:
           enum: [running]
         networkCount:
           type: integer
+        effectiveDensity:
+          type: integer
+          description: |
+            Generated runs only (omitted for custom runs). Barabási–Albert `m` actually used to
+            build every network: `floor(density × densityFactor)` clamped to
+            `[1, agentsPerNetwork − 1]` (0 would build an edgeless network; `m ≥ agentsPerNetwork`
+            cannot be built).
         wsUrl:
           type: string
           example: /ws
@@ -153,6 +175,7 @@ components:
           description: "0=DEGROOT, 1=MEMORY, 2=MEMORYLESS"
         count:
           type: integer
+          minimum: 1
           description: Number of agents of this type
 
     BiasType:
@@ -165,9 +188,12 @@ components:
           description: "0=DEGROOT, 1=CONFIRMATION, 2=BACKFIRE, 3=AUTHORITY, 4=INSULAR"
         count:
           type: integer
+          minimum: 1
           description: |
             Total number of EDGES in the network (not agents).
             Formula: density*(density-1) + (numberOfAgents - density) * 2*density
+            The server requires the counts (one per distinct `biasType`) to cover the edges of the
+            network built with `effectiveDensity`; otherwise `400 invalid_body`.
 
     GeneratedRunRequest:
       type: object
@@ -176,12 +202,19 @@ components:
         numberOfNetworks:
           type: integer
           minimum: 1
+          description: Capped per role by `usageLimits.maxNetworks` (`422 usage_limit_exceeded`).
         density:
           type: integer
-          minimum: 2
-          description: Barabási–Albert m parameter (edges added per new node)
+          minimum: 1
+          description: |
+            Requested Barabási–Albert m parameter (edges added per new node). Must satisfy
+            `1 ≤ density < agentsPerNetwork` (the sum of `agentTypes[].count`), otherwise
+            `400 invalid_body`. The server builds the networks with
+            `effectiveDensity = clamp(floor(density × densityFactor), 1, agentsPerNetwork − 1)`
+            and returns it in the response.
         iterationLimit:
           type: integer
+          minimum: 1
         stopThreshold:
           type: number
           format: float
@@ -195,10 +228,12 @@ components:
           type: integer
         agentTypes:
           type: array
+          minItems: 1
           items:
             $ref: '#/components/schemas/AgentType'
         biasTypes:
           type: array
+          minItems: 1
           items:
             $ref: '#/components/schemas/BiasType'
         persistFrames:
@@ -225,6 +260,13 @@ components:
       properties:
         name:
           type: string
+          maxLength: 32
+          description: |
+            Agent name, at most 32 characters (counted as characters, not bytes — the
+            `custom_agents.name` column is `varchar(32)`). Longer names → `400 invalid_body`.
+            Must be unique within the network (exact, case-sensitive match: `custom_agents` is
+            keyed by `(run_id, name)` and edges refer to agents by name); a repeated name →
+            `400 invalid_body` ("Duplicate agent name '<name>'").
         belief:
           type: number
           format: float
@@ -271,8 +313,13 @@ components:
       properties:
         name:
           type: string
+          maxLength: 32
+          description: |
+            Network name, at most 32 characters (counted as characters, not bytes — the
+            `custom_runs.run_name` column is `varchar(32)`). Longer names → `400 invalid_body`.
         iterationLimit:
           type: integer
+          minimum: 1
         stopThreshold:
           type: number
           format: float
@@ -280,10 +327,17 @@ components:
           type: integer
         agents:
           type: array
+          minItems: 1
+          description: Agent names must be unique within the network (exact, case-sensitive match).
           items:
             $ref: '#/components/schemas/Agent'
         edges:
           type: array
+          description: |
+            Every `source` / `target` must be the `name` of an agent in `agents`. Each directed
+            pair (`source`, `target`) may appear only once (exact match: `custom_neighbors` is
+            keyed by `(run_id, source, target)`; the reverse edge is a different pair); a repeated
+            edge → `400 invalid_body` ("Duplicate edge '<source>' -> '<target>'").
           items:
             $ref: '#/components/schemas/Edge'
         persistFrames:
@@ -444,6 +498,22 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SimCreated'
+              example:
+                runId: "7311520245839011840"
+                status: running
+                networkCount: 1
+                effectiveDensity: 2
+                wsUrl: /ws
+        '400':
+          description: |
+            `invalid_body` — the network cannot be built: `numberOfNetworks < 1`,
+            `iterationLimit < 1`, empty `agentTypes` / `biasTypes` or a count `< 1`, unknown
+            strategy / effect / bias code, `density < 1` or `density ≥ agentsPerNetwork`, or bias
+            counts that do not cover the edges of the network.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '401':
           description: Unauthorized
           content:
@@ -451,7 +521,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '422':
-          description: Usage limit exceeded
+          description: |
+            `usage_limit_exceeded` — agents per network, `iterationLimit` or `numberOfNetworks`
+            exceed the caller's `usageLimits` (`maxAgents`, `maxIterations`, `maxNetworks`).
+            Body: `{error, message, limit, requested}`.
           content:
             application/json:
               schema:
@@ -465,7 +538,32 @@ paths:
         Accepts two content types. Use `application/json` for networks with fewer than 1000
         agents. For larger networks, send `application/octet-stream` with the binary
         little-endian payload (same format as the legacy `POST /custom` endpoint) to avoid
-        serializing a large JSON body.
+        serializing a large JSON body. The binary payload has no `persistFrames` /
+        `frameRetention` fields, so the binary variant takes them as query parameters.
+      parameters:
+        - name: persistFrames
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: |
+            Binary (`application/octet-stream`) variant only — JSON requests use the body field of
+            the same name and ignore this parameter. Same meaning and default as
+            `CustomRunRequest.persistFrames`. Accepts `true` / `false` (any case); any other value
+            → `400 invalid_body`.
+        - name: frameRetention
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [ephemeral, persistent]
+            default: ephemeral
+          description: |
+            Binary (`application/octet-stream`) variant only — JSON requests use the body field of
+            the same name and ignore this parameter. Same meaning and default as
+            `CustomRunRequest.frameRetention`: `persistent` requires the `Administrator` role
+            (`403 forbidden`); an unknown value → `400 invalid_body`.
       requestBody:
         required: true
         content:
@@ -506,7 +604,13 @@ paths:
             description: >
               Binary payload (little-endian). Recommended for networks with 1000 or more
               agents. Format is identical to the legacy `POST /custom` binary protocol
-              (see that endpoint for the byte layout reference).
+              (see that endpoint for the byte layout reference). String length prefixes are
+              unsigned bytes. Subject to the same validation, role quotas and persistence as the
+              JSON variant (a `custom_runs` row owned by the caller), including the 32-character
+              limit on the network and agent names, unique agent names and unique edges. Frame
+              persistence is requested with the
+              `persistFrames` / `frameRetention` query parameters, e.g.
+              `POST /simulations/custom?persistFrames=true&frameRetention=ephemeral`.
       responses:
         '200':
           description: Run started
@@ -514,14 +618,43 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SimCreated'
+        '400':
+          description: |
+            `invalid_body` — malformed or truncated binary payload, no agents, `iterationLimit < 1`,
+            a network or agent name longer than 32 characters, a repeated agent name (names must
+            be unique within the network), unknown strategy / effect / bias code, an edge naming
+            an agent that is not defined, a repeated edge (same `source` and `target`), or an
+            invalid `frameRetention`
+            (body field, or query parameter on the binary variant) / `persistFrames` query
+            parameter.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '401':
           description: Unauthorized
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          description: "`forbidden` — `frameRetention=persistent` requested by a non-Administrator."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '422':
-          description: Usage limit exceeded
+          description: |
+            `usage_limit_exceeded` (JSON and binary variants) — the agent count or
+            `iterationLimit` exceed the caller's `usageLimits`. Body: `{error, message, limit, requested}`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: |
+            `internal_error` — the run could not be saved (`custom_runs` row and its agents /
+            edges); it was NOT started.
           content:
             application/json:
               schema:
@@ -1186,3 +1319,15 @@ paths:
               schema:
                 type: string
                 description: Snowflake run ID
+        '400':
+          description: "`invalid_body` — malformed binary payload (same checks as `POST /simulations/custom`)."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: "`internal_error` — the run could not be saved; it was NOT started."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'

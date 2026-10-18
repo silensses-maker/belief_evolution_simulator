@@ -237,12 +237,14 @@ object DatabaseManager {
      * @param runName             Human-readable name for this simulation run
      * @param customAgentsData    Container with all agent properties (beliefs, strategies, etc.)
      * @param customNeighborsData Container with network topology and influence data
+     * @return true when the transaction committed (or the database is skipped); false when it
+     *         failed and was rolled back (logged), so the caller must not start the run (#122)
      */
     def saveCustomRun(id: Long, iterationLimit: Int, stopThreshold: Float, runName: String,
         customAgentsData: CustomAgentsData, customNeighborsData: CustomNeighborsData,
         userId: Option[Int] = None,
-        frameRetention: String = "ephemeral"): Unit = {
-        if (GlobalState.APP_MODE.skipDatabase) return
+        frameRetention: String = "ephemeral"): Boolean = {
+        if (GlobalState.APP_MODE.skipDatabase) return true
         val connection = getConnection
         try {
             connection.setAutoCommit(false)
@@ -323,10 +325,12 @@ object DatabaseManager {
             customNeighborsStmt.executeBatch()
             
             connection.commit()
+            true
         } catch {
             case ex: Exception =>
                 connection.rollback()
-                Logger.logError(s"Error saving the run: ${ex.getMessage}")
+                Logger.logError(s"Error saving custom run $id: ${ex.getMessage}")
+                false
         } finally {
             connection.setAutoCommit(true)
             connection.close()
@@ -385,7 +389,11 @@ object DatabaseManager {
         updatedAt: String
     )
 
-    case class UsageLimits(maxAgents: Int, maxIterations: Int, densityFactor: Double)
+    /**
+     * Per-role quotas. `Int.MaxValue` means unlimited and is serialized as `null`.
+     * `maxNetworks` caps `numberOfNetworks` of generated runs (custom runs are always 1 network).
+     */
+    case class UsageLimits(maxAgents: Int, maxIterations: Int, densityFactor: Double, maxNetworks: Int)
 
     private val ROLE_PRIORITY: Map[String, Int] = Map(
         "Administrator" -> 3, "Researcher" -> 2, "BaseUser" -> 1, "Guest" -> 0
@@ -394,10 +402,10 @@ object DatabaseManager {
     def getUsageLimits(roles: Seq[String]): UsageLimits = {
         val top = roles.maxByOption(ROLE_PRIORITY.getOrElse(_, 0)).getOrElse("Guest")
         top match {
-            case "Administrator" => UsageLimits(Int.MaxValue, Int.MaxValue, 1.0)
-            case "Researcher"    => UsageLimits(1000, 1000, 0.75)
-            case "BaseUser"      => UsageLimits(100, 100, 0.5)
-            case _               => UsageLimits(10, 10, 0.5)
+            case "Administrator" => UsageLimits(Int.MaxValue, Int.MaxValue, 1.0, Int.MaxValue)
+            case "Researcher"    => UsageLimits(1000, 1000, 0.75, 20)
+            case "BaseUser"      => UsageLimits(100, 100, 0.5, 5)
+            case _               => UsageLimits(10, 10, 0.5, 1)
         }
     }
 
