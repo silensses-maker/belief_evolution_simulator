@@ -34,6 +34,7 @@ import DefaultJsonProtocol.*
 import java.nio.{ByteBuffer, ByteOrder}
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, ExecutionContextExecutor}
+import scala.util.control.NonFatal
 
 // ── JSON shapes for /simulations/* requests ──────────────────────────────────
 
@@ -225,7 +226,7 @@ object Server {
                             optionalHeaderValueByName("X-Forwarded-For") { xff =>
                                 logLegacy("/custom", ua, xff)
                                 entity(as[Payload]) { payload =>
-                                    complete(parseCustomRun(payload.data).toString)
+                                    complete(legacyCustomRun(payload.data))
                                 }
                             }
                         }
@@ -238,7 +239,7 @@ object Server {
                             optionalHeaderValueByName("X-Forwarded-For") { xff =>
                                 logLegacy("/neighbors", ua, xff)
                                 entity(as[Payload]) { payload =>
-                                    complete(parseCustomRun(payload.data).toString)
+                                    complete(legacyCustomRun(payload.data))
                                 }
                             }
                         }
@@ -247,6 +248,13 @@ object Server {
             }
         }
         
+        // Shared by /api/users/sync and /api/users/info so both expose the same quotas.
+        // Int.MaxValue (unlimited) is serialized as null.
+        def usageLimitsJson(limits: DatabaseManager.UsageLimits): String = {
+            def cap(value: Int): String = if (value == Int.MaxValue) "null" else value.toString
+            s"""{"maxAgents":${cap(limits.maxAgents)},"maxIterations":${cap(limits.maxIterations)},"densityFactor":${limits.densityFactor},"maxNetworks":${cap(limits.maxNetworks)}}"""
+        }
+
         val userRoutes: Route = addCorsHeaders {
             pathPrefix("api" / "users") {
                 // POST /api/users/sync — authenticated; uid comes from token, not body
@@ -260,11 +268,7 @@ object Server {
                               |  "name": "${authUser.name}",
                               |  "photo": ${authUser.photo.map(p => s""""$p"""").getOrElse("null")},
                               |  "roles": [${authUser.roles.map(r => s""""$r"""").mkString(",")}],
-                              |  "usageLimits": {
-                              |    "maxAgents": ${if (limits.maxAgents == Int.MaxValue) "null" else limits.maxAgents},
-                              |    "maxIterations": ${if (limits.maxIterations == Int.MaxValue) "null" else limits.maxIterations},
-                              |    "densityFactor": ${limits.densityFactor}
-                              |  },
+                              |  "usageLimits": ${usageLimitsJson(limits)},
                               |  "deactivated": false
                               |}""".stripMargin
                             complete(StatusCodes.OK ->
@@ -280,8 +284,9 @@ object Server {
                                 DatabaseManager.getUserByFirebaseUid(targetUid) match {
                                     case Some(user) =>
                                         val rolesJson = user.roles.map(r => s""""$r"""").mkString(",")
+                                        val limitsJson = usageLimitsJson(DatabaseManager.getUsageLimits(user.roles))
                                         complete(StatusCodes.OK -> HttpEntity(ContentTypes.`application/json`,
-                                            s"""{"uid":"${user.firebaseUid}","email":"${user.email}","name":"${user.name}","roles":[$rolesJson],"deactivated":${user.deactivated}}"""))
+                                            s"""{"uid":"${user.firebaseUid}","email":"${user.email}","name":"${user.name}","roles":[$rolesJson],"usageLimits":$limitsJson,"deactivated":${user.deactivated}}"""))
                                     case None =>
                                         complete(StatusCodes.NotFound ->
                                             errorJson("not_found", "User not found"))
@@ -330,13 +335,31 @@ object Server {
 
         import SimulationJsonProtocol.*
 
-        def simCreatedJson(runId: Long, networkCount: Int): String =
-            s"""{
-               |  "runId": "$runId",
-               |  "status": "running",
-               |  "networkCount": $networkCount,
-               |  "wsUrl": "/ws"
-               |}""".stripMargin
+        // effectiveDensity is only sent for generated runs (#83, #122).
+        def simCreatedJson(runId: Long, networkCount: Int, effectiveDensity: Option[Int] = None): String = {
+            val densityField = effectiveDensity.map(d => s""""effectiveDensity":$d,""").getOrElse("")
+            s"""{"runId":"$runId","status":"running","networkCount":$networkCount,$densityField"wsUrl":"/ws"}"""
+        }
+
+        def invalidBody(message: String): HttpResponse =
+            HttpResponse(StatusCodes.BadRequest, entity = errorJson("invalid_body", message))
+
+        // 422 usage_limit_exceeded for the first per-role quota the request exceeds. Shared by
+        // /simulations/generated and both variants (JSON + binary) of /simulations/custom.
+        // Custom runs always have a single network.
+        def usageLimitError(limits: DatabaseManager.UsageLimits, agents: Int, iterations: Int,
+                            networks: Int = 1): Option[HttpResponse] = {
+            def exceeded(message: String, limit: Int, requested: Int): Option[HttpResponse] =
+                Some(HttpResponse(StatusCodes.UnprocessableEntity,
+                    entity = usageLimitJson(message, limit, requested)))
+            if (agents > limits.maxAgents)
+                exceeded("Agent count exceeds your limit", limits.maxAgents, agents)
+            else if (iterations > limits.maxIterations)
+                exceeded("Iteration limit exceeds your limit", limits.maxIterations, iterations)
+            else if (networks > limits.maxNetworks)
+                exceeded("Network count exceeds your limit", limits.maxNetworks, networks)
+            else None
+        }
 
         def runSummaryJson(r: DatabaseManager.RunSummary): String =
             s"""{
@@ -368,6 +391,15 @@ object Server {
                         entity = errorJson("invalid_body", s"Invalid frameRetention: $other")))
             }
 
+        // Optional boolean query parameter (binary POST /simulations/custom). Same default as the
+        // JSON field (absent → false); "true" / "false" in any case, anything else → 400 invalid_body.
+        def booleanParam(name: String, value: Option[String]): Either[HttpResponse, Boolean] =
+            value.map(_.toLowerCase) match {
+                case None | Some("false") => Right(false)
+                case Some("true")         => Right(true)
+                case Some(other)          => Left(invalidBody(s"Invalid $name: $other (expected true or false)"))
+            }
+
         val simulationRoutes: Route = addCorsHeaders {
             pathPrefix("simulations") {
                 // POST /simulations/generated  — JSON body
@@ -376,18 +408,20 @@ object Server {
                         authenticate { authUser =>
                             entity(as[GeneratedRunReq]) { req =>
                                 val limits = DatabaseManager.getUsageLimits(authUser.roles)
-                                val agentsPerNetwork = req.agentTypes.map(_.count).sum
-                                if (agentsPerNetwork > limits.maxAgents)
-                                    complete(StatusCodes.UnprocessableEntity ->
-                                        usageLimitJson("Agent count exceeds your limit", limits.maxAgents, agentsPerNetwork))
-                                else if (req.iterationLimit > limits.maxIterations)
-                                    complete(StatusCodes.UnprocessableEntity ->
-                                        usageLimitJson("Iteration limit exceeds your limit", limits.maxIterations, req.iterationLimit))
-                                else resolveFrameRetention(req.frameRetention, authUser.isAdmin) match {
+                                // 400 (impossible network) → 422 (role quotas) → frameRetention.
+                                val checked: Either[HttpResponse, (Int, Int, String)] = for {
+                                    agentsPerNetwork <- validateGeneratedRunReq(req).left.map(invalidBody)
+                                    effectiveDensity = clampEffectiveDensity(req.density, limits.densityFactor, agentsPerNetwork)
+                                    _ <- validateBiasCoverage(req.biasTypes, effectiveDensity, agentsPerNetwork)
+                                             .toLeft(()).left.map(invalidBody)
+                                    _ <- usageLimitError(limits, agentsPerNetwork, req.iterationLimit, req.numberOfNetworks)
+                                             .toLeft(())
+                                    retention <- resolveFrameRetention(req.frameRetention, authUser.isAdmin)
+                                } yield (agentsPerNetwork, effectiveDensity, retention)
+                                checked match {
                                     case Left(resp) => complete(resp)
-                                    case Right(retention) =>
+                                    case Right((agentsPerNetwork, effectiveDensity, retention)) =>
                                         val persistFrames = req.persistFrames.getOrElse(false)
-                                        val effectiveDensity = (req.density * limits.densityFactor).toInt
                                         val seed = req.seed.getOrElse(-1L) match {
                                             case -1L => System.currentTimeMillis() ^ System.nanoTime()
                                             case s   => s
@@ -409,7 +443,7 @@ object Server {
                                             persistFrames = persistFrames,
                                             frameRetention = retention
                                         )
-                                        complete(jsonOk(simCreatedJson(runId, req.numberOfNetworks)))
+                                        complete(jsonOk(simCreatedJson(runId, req.numberOfNetworks, Some(effectiveDensity))))
                                 }
                             }
                         }
@@ -422,30 +456,51 @@ object Server {
                             extractRequest { req =>
                                 val ct = req.entity.contentType.mediaType.toString
                                 if (ct.contains("octet-stream")) {
-                                    // Binary payload has no persistFrames flag — defaults to false/ephemeral.
-                                    entity(as[Payload]) { payload =>
-                                        val runId = parseCustomRun(payload.data, Some(authUser.dbUserId))
-                                        complete(jsonOk(simCreatedJson(runId, 1)))
+                                    // The binary payload has no persistFrames / frameRetention fields: they
+                                    // come as optional query parameters with the JSON fields' semantics and
+                                    // defaults (false / ephemeral). Decoded (no side effects) and checked
+                                    // against the role quotas BEFORE anything is persisted or sent to the
+                                    // Monitor (#122).
+                                    parameters("persistFrames".?, "frameRetention".?) { (persistFramesParam, frameRetentionParam) =>
+                                        entity(as[Payload]) { payload =>
+                                            val limits = DatabaseManager.getUsageLimits(authUser.roles)
+                                            val checked: Either[HttpResponse, (DecodedCustomRun, Boolean, String)] = for {
+                                                persistFrames <- booleanParam("persistFrames", persistFramesParam)
+                                                run <- decodeCustomRun(payload.data).left.map(invalidBody)
+                                                _   <- usageLimitError(limits, run.agentNames.length, run.iterationLimit)
+                                                           .toLeft(())
+                                                retention <- resolveFrameRetention(frameRetentionParam, authUser.isAdmin)
+                                            } yield (run, persistFrames, retention)
+                                            checked match {
+                                                case Left(resp) => complete(resp)
+                                                case Right((run, persistFrames, retention)) =>
+                                                    startCustomRun(run, Some(authUser.dbUserId), persistFrames, retention) match {
+                                                        case Left(resp)   => complete(resp)
+                                                        case Right(runId) => complete(jsonOk(simCreatedJson(runId, 1)))
+                                                    }
+                                            }
+                                        }
                                     }
                                 } else {
                                     entity(as[CustomRunReq]) { runReq =>
                                         val limits = DatabaseManager.getUsageLimits(authUser.roles)
-                                        val agentCount = runReq.agents.size
-                                        if (agentCount > limits.maxAgents)
-                                            complete(StatusCodes.UnprocessableEntity ->
-                                                usageLimitJson("Agent count exceeds your limit", limits.maxAgents, agentCount))
-                                        else if (runReq.iterationLimit > limits.maxIterations)
-                                            complete(StatusCodes.UnprocessableEntity ->
-                                                usageLimitJson("Iteration limit exceeds your limit", limits.maxIterations, runReq.iterationLimit))
-                                        else resolveFrameRetention(runReq.frameRetention, authUser.isAdmin) match {
+                                        val checked: Either[HttpResponse, String] = for {
+                                            _ <- validateCustomRunReq(runReq).toLeft(()).left.map(invalidBody)
+                                            _ <- usageLimitError(limits, runReq.agents.size, runReq.iterationLimit)
+                                                     .toLeft(())
+                                            retention <- resolveFrameRetention(runReq.frameRetention, authUser.isAdmin)
+                                        } yield retention
+                                        checked match {
                                             case Left(resp) => complete(resp)
                                             case Right(retention) =>
-                                                val runId = executeCustomRunFromJson(
+                                                executeCustomRunFromJson(
                                                     runReq, Some(authUser.dbUserId),
                                                     persistFrames = runReq.persistFrames.getOrElse(false),
                                                     frameRetention = retention
-                                                )
-                                                complete(jsonOk(simCreatedJson(runId, 1)))
+                                                ) match {
+                                                    case Left(resp)   => complete(resp)
+                                                    case Right(runId) => complete(jsonOk(simCreatedJson(runId, 1)))
+                                                }
                                         }
                                     }
                                 }
@@ -975,26 +1030,224 @@ object Server {
         ).toString
     }
     
-    private def parseCustomRun(
-        data: Array[Byte],
-        userId: Option[Int] = None,
-        persistFrames: Boolean = false,
-        frameRetention: String = "ephemeral"
-    ): Long = {
+    /** Rejected request detail, surfaced as 400 invalid_body (never an actor crash, #122). */
+    private final class InvalidRunRequest(message: String) extends RuntimeException(message)
+
+    // Codes accepted by the simulator (openapi.yaml enums). Anything else makes `.name` throw while
+    // persisting, or throws inside the agents' update loop for biases.
+    private def isSilenceStrategy(code: Int): Boolean = code >= 0 && code <= SilenceStrategies.CONFIDENCE.toInt
+    private def isSilenceEffect(code: Int): Boolean = code >= 0 && code <= SilenceEffects.MEMORYLESS.toInt
+    private def isBias(code: Int): Boolean = code >= 0 && code <= CognitiveBiases.INSULAR.toByte
+
+    /**
+     * `custom_runs.run_name` and `custom_agents.name` are varchar(32). A longer name made
+     * saveCustomRun roll back while the run still started without its owner row, so both custom
+     * variants reject it up front. Postgres counts characters (code points), not bytes or UTF-16
+     * units, hence codePointCount.
+     */
+    private val MaxCustomNameLength = 32
+
+    /** Some(message) (→ 400 invalid_body) when `name` does not fit the varchar(32) columns. */
+    private def customNameTooLong(field: String, name: String): Option[String] = {
+        val length = name.codePointCount(0, name.length)
+        if (length > MaxCustomNameLength)
+            Some(s"$field must be at most $MaxCustomNameLength characters (got $length)")
+        else None
+    }
+
+    /**
+     * Some(message) (→ 400 invalid_body) naming the first repeated agent name. `custom_agents` is
+     * keyed by (run_id, name), so a repeated name made saveCustomRun fail (500), and edges refer to
+     * agents by name, so they would be ambiguous anyway. Exact, case-sensitive match, like the key.
+     */
+    private def duplicateAgentName(names: IterableOnce[String]): Option[String] = {
+        val seen = mutable.HashSet.empty[String]
+        names.iterator.find(name => !seen.add(name)).map(name => s"Duplicate agent name '$name'")
+    }
+
+    /**
+     * Some(message) (→ 400 invalid_body) naming the first repeated directed edge (same source and
+     * target, exact match). `custom_neighbors` is keyed by (run_id, source, target), so a repeated
+     * edge made saveCustomRun fail (500). Reverse edges (B -> A after A -> B) are distinct.
+     */
+    private def duplicateEdge(edges: IterableOnce[(String, String)]): Option[String] = {
+        val seen = mutable.HashSet.empty[(String, String)]
+        edges.iterator.find(edge => !seen.add(edge)).map { case (source, target) =>
+            s"Duplicate edge '$source' -> '$target'"
+        }
+    }
+
+    /**
+     * Effective Barabási–Albert `m` of a generated run: `density × densityFactor` (#83) clamped to
+     * `[1, agentsPerNetwork - 1]` (#122). Bounds derived from `Network.scala` (`BuildNetwork`):
+     *  - `m = 0` builds no edges at all (phase 1 core is a single agent, phase 2 picks 0 neighbours
+     *    per agent), so every agent would be isolated → lower bound 1 (m = 1 still builds a tree).
+     *  - phase 1 fully connects agents `0..m` through `indexOffset` (length n) and
+     *    `FenwickTree(n, m, ...)` seeds `m + 1` slots of an `n + 1` array, so `m + 1 <= n`
+     *    (m >= n throws ArrayIndexOutOfBounds inside the actor; m = n - 1 is the complete graph)
+     *    → upper bound `agentsPerNetwork - 1`.
+     * The requested density is already validated to that range (see validateGeneratedRunReq) and
+     * densityFactor <= 1, so the clamp only lifts `floor(density × densityFactor) = 0` to 1; the
+     * upper bound is defensive.
+     */
+    private def clampEffectiveDensity(density: Int, densityFactor: Double, agentsPerNetwork: Int): Int =
+        math.min(math.max((density * densityFactor).toInt, 1), agentsPerNetwork - 1)
+
+    /**
+     * Rejects generated runs that cannot be built (#122). Returns agentsPerNetwork on success.
+     * The requested density must satisfy `1 <= density < agentsPerNetwork` (see
+     * clampEffectiveDensity), which also requires at least 2 agents per network.
+     */
+    private def validateGeneratedRunReq(req: GeneratedRunReq): Either[String, Int] = {
+        val totalAgents = req.agentTypes.iterator.map(_.count.toLong).sum
+        if (req.numberOfNetworks < 1)
+            Left("numberOfNetworks must be at least 1")
+        else if (req.iterationLimit < 1)
+            Left("iterationLimit must be at least 1")
+        else if (req.agentTypes.isEmpty || req.agentTypes.exists(_.count < 1))
+            Left("agentTypes must not be empty and every count must be at least 1")
+        else if (req.agentTypes.exists(a => !isSilenceStrategy(a.silenceStrategy) || !isSilenceEffect(a.silenceEffect)))
+            Left("agentTypes contains an unknown silenceStrategy or silenceEffect")
+        else if (req.biasTypes.isEmpty || req.biasTypes.exists(_.count < 1))
+            Left("biasTypes must not be empty and every count must be at least 1")
+        else if (req.biasTypes.exists(b => !isBias(b.biasType)))
+            Left("biasTypes contains an unknown biasType")
+        else if (totalAgents > Int.MaxValue)
+            Left("Total agent count is too large")
+        else if (req.density < 1 || req.density >= totalAgents)
+            Left(s"density must satisfy 1 <= density < agentsPerNetwork ($totalAgents), got ${req.density}")
+        else
+            Right(totalAgents.toInt)
+    }
+
+    /**
+     * Every directed edge of a generated network receives a bias from biasTypes: each agent actor
+     * consumes the counts edge by edge (AgentProcessor) and indexes past the last bias type once all
+     * of them reach 0, so the counts (one per distinct biasType, the last one wins as in Network)
+     * must cover the `E = m(m-1) + (n-m)·2m` edges of a network built with m = effectiveDensity.
+     * E must also fit the Int-sized arrays Network allocates.
+     */
+    private def validateBiasCoverage(biasTypes: Seq[BiasTypeReq], effectiveDensity: Int,
+                                     agentsPerNetwork: Int): Option[String] = {
+        val m = effectiveDensity.toLong
+        val edges = m * (m - 1) + (agentsPerNetwork - m) * 2 * m
+        val covered = biasTypes.map(b => b.biasType -> b.count.toLong).toMap.values.sum
+        if (edges > Int.MaxValue - 8)
+            Some(s"Network too large: $edges edges per network")
+        else if (covered < edges)
+            Some(s"biasTypes counts ($covered) must cover the $edges edges of each network (effectiveDensity $effectiveDensity)")
+        else None
+    }
+
+    /** Rejects JSON custom runs the simulator cannot run (#122); None when the request is valid. */
+    private def validateCustomRunReq(req: CustomRunReq): Option[String] = {
+        lazy val names = req.agents.iterator.map(_.name).toSet
+        if (req.agents.isEmpty) Some("agents must not be empty")
+        else if (req.iterationLimit < 1) Some("iterationLimit must be at least 1")
+        else customNameTooLong("name", req.name).orElse(req.agents.iterator.zipWithIndex
+            .flatMap { case (a, i) => customNameTooLong(s"agents[$i].name", a.name) }
+            .nextOption()
+        ).orElse(duplicateAgentName(req.agents.iterator.map(_.name))
+        ).orElse(req.agents.collectFirst {
+            case a if !isSilenceStrategy(a.silenceStrategy) =>
+                s"Agent '${a.name}' has an unknown silenceStrategy (${a.silenceStrategy})"
+            case a if !isSilenceEffect(a.silenceEffect) =>
+                s"Agent '${a.name}' has an unknown silenceEffect (${a.silenceEffect})"
+        }).orElse(req.edges.collectFirst {
+            case e if !names.contains(e.source) => s"Edge source '${e.source}' is not a defined agent"
+            case e if !names.contains(e.target) => s"Edge target '${e.target}' is not a defined agent"
+            case e if !isBias(e.bias)           => s"Edge ${e.source} -> ${e.target} has an unknown bias (${e.bias})"
+        }).orElse(duplicateEdge(req.edges.iterator.map(e => (e.source, e.target))))
+    }
+
+    /** A custom run ready to persist and start — produced by both the binary and the JSON variants. */
+    private final case class DecodedCustomRun(
+        networkName: String,
+        stopThreshold: Float,
+        iterationLimit: Int,
+        saveMode: Byte,
+        agentNames: Array[String],
+        initialBeliefs: Array[Float],
+        toleranceRadius: Array[Float],
+        toleranceOffset: Array[Float],
+        silenceStrategies: Array[SilenceStrategy],
+        silenceEffects: Array[SilenceEffect],
+        majorityThreshold: Option[mutable.Map[Int, Float]],
+        confidences: Option[mutable.Map[Int, Float]],
+        indexOffset: Array[Int],
+        sortedSource: Array[Int],
+        sortedTarget: Array[Int],
+        sortedInfluences: Array[Float],
+        sortedBiases: Array[Bias]
+    )
+
+    /**
+     * Legacy POST /custom and GET /neighbors: run id as plain text, 400 JSON when malformed, 500 JSON
+     * when the run could not be saved (see startCustomRun).
+     */
+    private def legacyCustomRun(data: Array[Byte]): HttpResponse =
+        decodeCustomRun(data) match {
+            case Left(message) =>
+                HttpResponse(StatusCodes.BadRequest, entity = errorJson("invalid_body", message))
+            case Right(run) =>
+                startCustomRun(run) match {
+                    case Left(resp)   => resp
+                    case Right(runId) => HttpResponse(StatusCodes.OK, entity = HttpEntity(runId.toString))
+                }
+        }
+
+    /**
+     * Decodes the little-endian binary custom-run payload (legacy `POST /custom` format, also sent
+     * to `POST /simulations/custom` as application/octet-stream) WITHOUT side effects, so callers
+     * can apply the role quotas before anything is persisted or started (#122). Every read is
+     * bounds-checked; truncated sections, unknown strategy/effect/bias codes, repeated agent names,
+     * edges naming an undefined agent and repeated edges yield Left(message) (→ 400 invalid_body)
+     * instead of an exception.
+     */
+    private def decodeCustomRun(data: Array[Byte]): Either[String, DecodedCustomRun] =
+        try Right(decodeCustomRunUnchecked(data))
+        catch {
+            case e: InvalidRunRequest => Left(e.getMessage)
+            case NonFatal(e)          => Left(s"Malformed binary payload (${e.getClass.getSimpleName})")
+        }
+
+    private def decodeCustomRunUnchecked(data: Array[Byte]): DecodedCustomRun = {
+        var offset = 0
+        def invalid(message: String): Nothing = throw new InvalidRunRequest(message)
+        // Ensures `bytes` more bytes are available at the current offset.
+        def need(bytes: Long, section: String): Unit =
+            if (bytes < 0 || offset.toLong + bytes > data.length)
+                invalid(s"Malformed binary payload: truncated $section")
+        // Length prefixes are written as unsigned bytes (frontend encoder: Uint8).
+        def readString(section: String): String = {
+            need(1, section)
+            val length = data(offset) & 0xFF
+            offset += 1
+            need(length, section)
+            val str = byteArrToString(data, offset, length)
+            offset += length
+            str
+        }
+
         // Header
+        need(10, "header")
         val stopThreshold = bytesToFloat(data, 0)
         val iterationLimit = bytesToInt(data, 4)
         val saveMode = data(8)
-        var offset = 9
-        val networkNameLength = data(9)
-        val networkName = byteArrToString(data, 10, networkNameLength)
-        offset = 10 + networkNameLength
+        offset = 9
+        val networkName = readString("network name")
+        if (iterationLimit < 1) invalid("iterationLimit must be at least 1")
+        customNameTooLong("network name", networkName).foreach(invalid)
         
         while (offset % 4 != 0) offset += 1
         
         // Agent section
+        need(4, "agent count")
         val numberOfAgents = bytesToInt(data, offset)
         offset += 4
+        if (numberOfAgents < 1) invalid("The payload must define at least one agent")
+        // 3 floats + strategy + effect + name length per agent, checked before allocating.
+        need(15L * numberOfAgents, "agent section")
         
         val initialBeliefs = byteArrayToFloatArray(data, offset, numberOfAgents)
         offset += 4 * numberOfAgents
@@ -1010,52 +1263,63 @@ object Server {
         
         val silenceEffects = data.slice(offset, offset + numberOfAgents).asInstanceOf[Array[SilenceEffect]]
         offset += numberOfAgents
+
+        if (silenceStrategies.exists(s => !isSilenceStrategy(s.toInt)))
+            invalid("The payload contains an unknown silenceStrategy")
+        if (silenceEffects.exists(e => !isSilenceEffect(e.toInt)))
+            invalid("The payload contains an unknown silenceEffect")
         
         // Read the agent names
         val agentNames = new Array[String](numberOfAgents)
         val agentIndexes = new mutable.HashMap[String, Int]()
         for (i <- 0 until numberOfAgents) {
-            val strByteLength = data(offset)
-            offset += 1
-            agentNames(i) = byteArrToString(data, offset, strByteLength)
+            agentNames(i) = readString("agent names")
+            customNameTooLong(s"agents[$i].name", agentNames(i)).foreach(invalid)
             agentIndexes.put(agentNames(i), i)
-            offset += strByteLength
         }
+        duplicateAgentName(agentNames).foreach(invalid)
         
         // Align to 4 bytes
         while (offset % 4 != 0) offset += 1
         
         // Neighbor section
+        need(4, "edge count")
         val numberOfNeighbors = bytesToInt(data, offset)
         
         offset += 4
+        if (numberOfNeighbors < 0) invalid("The edge count cannot be negative")
+        // influence + bias + source/target name lengths per edge, checked before allocating.
+        need(7L * numberOfNeighbors, "edge section")
         
         val influences = byteArrayToFloatArray(data, offset, numberOfNeighbors)
         offset += 4 * numberOfNeighbors
         
         val biases = data.slice(offset, offset + numberOfNeighbors).asInstanceOf[Array[Bias]]
         offset += numberOfNeighbors
+        if (biases.exists(b => !isBias(b.toByte)))
+            invalid("The payload contains an unknown bias")
+
+        def agentIndex(name: String, role: String): Int =
+            agentIndexes.getOrElse(name, invalid(s"Edge $role '$name' is not a defined agent"))
         
         val source = new Array[Int](numberOfNeighbors)
         for (i <- 0 until numberOfNeighbors) {
-            val strByteLength = data(offset)
-            offset += 1
-            source(i) = agentIndexes(byteArrToString(data, offset, strByteLength))
-            offset += strByteLength
+            source(i) = agentIndex(readString("edge sources"), "source")
         }
         
         val target = new Array[Int](numberOfNeighbors)
         for (i <- 0 until numberOfNeighbors) {
-            val strByteLength = data(offset)
-            offset += 1
-            target(i) = agentIndexes(byteArrToString(data, offset, strByteLength))
-            offset += strByteLength
+            target(i) = agentIndex(readString("edge targets"), "target")
         }
-        
+        // Agent names are unique (checked above), so equal index pairs are equal name pairs.
+        duplicateEdge((0 until numberOfNeighbors).iterator.map(i => (agentNames(source(i)), agentNames(target(i)))))
+            .foreach(invalid)
+
         // Optional data
         val majorityThreshold: mutable.Map[Int, Float] = mutable.Map()
         val confidences: mutable.Map[Int, Float] = mutable.Map()
         while (offset < data.length) {
+            need(12, "optional agent data")
             val possibleConfidence = bytesToFloat(data, offset + 8)
             possibleConfidence match {
                 case 2.0 =>
@@ -1084,75 +1348,114 @@ object Server {
             }
         }
         indexOffset(indexOffset.length - 1) = numberOfNeighbors
-        
-        var runID = SnowflakeID.generateId()
-        val convertedSaveMode = if (GlobalState.APP_MODE.skipDatabase) SaveModes.DEBUG
-        else SaveModes.codeToSaveMode(saveMode)
-        
-        if (SaveModes.savesToDB(convertedSaveMode)) {
-            runID = DatabaseManager.createRun(
-                RunMode.GENERATED, saveMode, 1, None, None,
-                stopThreshold, iterationLimit,
-                "uniform"
-            ).get
-        } else if (!GlobalState.APP_MODE.skipDatabase) {
-            DatabaseManager.saveCustomRun(
-                id = runID,
-                iterationLimit = iterationLimit,
-                stopThreshold = stopThreshold,
-                runName = networkName,
-                customAgentsData = CustomAgentsData(
-                    initialBeliefs,
-                    toleranceRadius,
-                    toleranceOffset,
-                    silenceStrategies,
-                    silenceEffects,
-                    agentNames,
-                    if (majorityThreshold.isEmpty) None else Some(majorityThreshold),
-                    if (confidences.isEmpty) None else Some(confidences),
-                ),
-                customNeighborsData = CustomNeighborsData(
-                    sortedSource,
-                    sortedTarget,
-                    sortedInfluences,
-                    sortedBiases
-                ),
-                userId = userId,
-                frameRetention = frameRetention
-            )
-        }
 
-
-        val customRunInfo = CustomRunInfo(
-            runID = runID,
-            stopThreshold = stopThreshold,
-            iterationLimit = iterationLimit,
-            saveMode = convertedSaveMode,
-            networkName = networkName,
-            agentBeliefs = initialBeliefs,
-            agentToleranceRadii = toleranceRadius,
-            agentToleranceOffsets = toleranceOffset,
-            agentSilenceStrategy = silenceStrategies,
-            agentSilenceEffect = silenceEffects,
-            agentNames = agentNames,
-            indexOffset = indexOffset,
-            target = sortedTarget,
-            influences = sortedInfluences,
-            bias = sortedBiases,
-            persistFrames = persistFrames
+        DecodedCustomRun(
+            networkName       = networkName,
+            stopThreshold     = stopThreshold,
+            iterationLimit    = iterationLimit,
+            saveMode          = saveMode,
+            agentNames        = agentNames,
+            initialBeliefs    = initialBeliefs,
+            toleranceRadius   = toleranceRadius,
+            toleranceOffset   = toleranceOffset,
+            silenceStrategies = silenceStrategies,
+            silenceEffects    = silenceEffects,
+            majorityThreshold = if (majorityThreshold.isEmpty) None else Some(majorityThreshold),
+            confidences       = if (confidences.isEmpty) None else Some(confidences),
+            indexOffset       = indexOffset,
+            sortedSource      = sortedSource,
+            sortedTarget      = sortedTarget,
+            sortedInfluences  = sortedInfluences,
+            sortedBiases      = sortedBiases
         )
-        
-        monitor.get ! RunCustomNetwork(customRunInfo)
-
-        runID
     }
 
+    /**
+     * Persists and starts a custom run. Single save-mode gate for the JSON and binary variants
+     * (#122): the legacy DB is only used when APP_MODE.usesLegacyDB; otherwise (unless the DB is
+     * skipped) a `custom_runs` row carrying the caller's user_id is written, so the run shows up in
+     * /simulations/mine and passes the owner-only checks.
+     * If that row cannot be written the run is NOT started: Left(500 internal_error) instead of a
+     * run without its owner row.
+     */
+    private def startCustomRun(
+        run: DecodedCustomRun,
+        userId: Option[Int] = None,
+        persistFrames: Boolean = false,
+        frameRetention: String = "ephemeral"
+    ): Either[HttpResponse, Long] = {
+        var runID = SnowflakeID.generateId()
+        val convertedSaveMode = if (GlobalState.APP_MODE.skipDatabase || !GlobalState.APP_MODE.usesLegacyDB)
+                                    SaveModes.DEBUG
+                                else SaveModes.codeToSaveMode(run.saveMode)
+
+        if (GlobalState.APP_MODE.usesLegacyDB && SaveModes.savesToDB(convertedSaveMode)) {
+            runID = DatabaseManager.createRun(
+                RunMode.GENERATED, run.saveMode, 1, None, None,
+                run.stopThreshold, run.iterationLimit, "uniform"
+            ).get
+        } else if (!GlobalState.APP_MODE.skipDatabase) {
+            // saveCustomRun logs and rolls back its own SQL errors; this also covers failing to get
+            // a connection at all.
+            val saved = try DatabaseManager.saveCustomRun(
+                id                = runID,
+                iterationLimit    = run.iterationLimit,
+                stopThreshold     = run.stopThreshold,
+                runName           = run.networkName,
+                customAgentsData  = CustomAgentsData(
+                    run.initialBeliefs,
+                    run.toleranceRadius,
+                    run.toleranceOffset,
+                    run.silenceStrategies,
+                    run.silenceEffects,
+                    run.agentNames,
+                    run.majorityThreshold,
+                    run.confidences
+                ),
+                customNeighborsData = CustomNeighborsData(
+                    run.sortedSource, run.sortedTarget, run.sortedInfluences, run.sortedBiases),
+                userId = userId,
+                frameRetention = frameRetention
+            ) catch {
+                case NonFatal(e) =>
+                    Logger.logError(s"Error saving custom run $runID", e)
+                    false
+            }
+            if (!saved)
+                return Left(HttpResponse(StatusCodes.InternalServerError, entity = errorJson(
+                    "internal_error", "The custom run could not be saved, so it was not started")))
+        }
+
+        monitor.get ! RunCustomNetwork(CustomRunInfo(
+            runID                = runID,
+            stopThreshold        = run.stopThreshold,
+            iterationLimit       = run.iterationLimit,
+            saveMode             = convertedSaveMode,
+            networkName          = run.networkName,
+            agentBeliefs         = run.initialBeliefs,
+            agentToleranceRadii  = run.toleranceRadius,
+            agentToleranceOffsets= run.toleranceOffset,
+            agentSilenceStrategy = run.silenceStrategies,
+            agentSilenceEffect   = run.silenceEffects,
+            agentNames           = run.agentNames,
+            indexOffset          = run.indexOffset,
+            target               = run.sortedTarget,
+            influences           = run.sortedInfluences,
+            bias                 = run.sortedBiases,
+            persistFrames        = persistFrames
+        ))
+
+        Right(runID)
+    }
+
+    // Expects a request already accepted by validateCustomRunReq (edge names resolve).
+    // Left(500) when the run could not be saved (see startCustomRun).
     private def executeCustomRunFromJson(
         req: CustomRunReq,
         userId: Option[Int],
         persistFrames: Boolean = false,
         frameRetention: String = "ephemeral"
-    ): Long = {
+    ): Either[HttpResponse, Long] = {
         val agentIndexes = req.agents.zipWithIndex.map { case (a, i) => a.name -> i }.toMap
         val agentNames         = req.agents.map(_.name).toArray
         val initialBeliefs     = req.agents.map(_.belief).toArray
@@ -1184,50 +1487,28 @@ object Server {
         }
         if (nNeighbors > 0) indexOffset(indexOffset.length - 1) = nNeighbors
 
-        var runID = SnowflakeID.generateId()
-        val saveMode = req.saveMode.toByte
-        val convertedSaveMode = if (GlobalState.APP_MODE.skipDatabase || !GlobalState.APP_MODE.usesLegacyDB)
-                                    SaveModes.DEBUG
-                                else SaveModes.codeToSaveMode(saveMode)
-
-        if (GlobalState.APP_MODE.usesLegacyDB && SaveModes.savesToDB(convertedSaveMode)) {
-            runID = DatabaseManager.createRun(
-                RunMode.GENERATED, saveMode, 1, None, None,
-                req.stopThreshold, req.iterationLimit, "uniform"
-            ).get
-        } else if (!GlobalState.APP_MODE.skipDatabase) {
-            DatabaseManager.saveCustomRun(
-                id                = runID,
-                iterationLimit    = req.iterationLimit,
+        startCustomRun(
+            DecodedCustomRun(
+                networkName       = req.name,
                 stopThreshold     = req.stopThreshold,
-                runName           = req.name,
-                customAgentsData  = CustomAgentsData(initialBeliefs, toleranceRadius, toleranceOffset,
-                                      silenceStrategies, silenceEffects, agentNames, None, None),
-                customNeighborsData = CustomNeighborsData(sortedSrc, sortedTgt, sortedInf, sortedBiases),
-                userId = userId,
-                frameRetention = frameRetention
-            )
-        }
-
-        monitor.get ! RunCustomNetwork(CustomRunInfo(
-            runID                = runID,
-            stopThreshold        = req.stopThreshold,
-            iterationLimit       = req.iterationLimit,
-            saveMode             = convertedSaveMode,
-            networkName          = req.name,
-            agentBeliefs         = initialBeliefs,
-            agentToleranceRadii  = toleranceRadius,
-            agentToleranceOffsets= toleranceOffset,
-            agentSilenceStrategy = silenceStrategies,
-            agentSilenceEffect   = silenceEffects,
-            agentNames           = agentNames,
-            indexOffset          = indexOffset,
-            target               = sortedTgt,
-            influences           = sortedInf,
-            bias                 = sortedBiases,
-            persistFrames        = persistFrames
-        ))
-        runID
+                iterationLimit    = req.iterationLimit,
+                saveMode          = req.saveMode.toByte,
+                agentNames        = agentNames,
+                initialBeliefs    = initialBeliefs,
+                toleranceRadius   = toleranceRadius,
+                toleranceOffset   = toleranceOffset,
+                silenceStrategies = silenceStrategies,
+                silenceEffects    = silenceEffects,
+                majorityThreshold = None,
+                confidences       = None,
+                indexOffset       = indexOffset,
+                sortedSource      = sortedSrc,
+                sortedTarget      = sortedTgt,
+                sortedInfluences  = sortedInf,
+                sortedBiases      = sortedBiases
+            ),
+            userId, persistFrames, frameRetention
+        )
     }
 
     // Utility methods for data transformation
