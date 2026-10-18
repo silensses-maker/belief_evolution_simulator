@@ -33,5 +33,6 @@ project/plugins/project/
 *.gif
 *.svg
 .env
+docker-compose.override.yml
 .claude/
 .context/
