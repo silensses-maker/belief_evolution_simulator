@@ -441,16 +441,15 @@ class AgentProcessor(
      * │ round (4 bytes)         │ Current simulation round number                   │ <br>
      * │ startsAt (4 bytes)      │ Starting index of this processor's agent range    │ <br>
      * ├─────────────────────────┼───────────────────────────────────────────────────┤ <br>
-     * │ BELIEF DATA (numberOfAgents * 8 bytes)                                      │ <br>
+     * │ BELIEF DATA (numberOfAgents * 8 bytes) - two blocks, NOT interleaved        │ <br>
      * ├─────────────────────────┼───────────────────────────────────────────────────┤ <br>
-     * │ publicBeliefs (4 bytes) │ Public belief values [0.0-1.0] for each agent     │ <br>
-     * │ privateBeliefs (4 bytes)│ Private belief values [0.0-1.0] for each agent    │ <br>
-     * │ ... (repeated for each agent)                                               │ <br>
+     * │ publicBeliefs (n * 4 B) │ Public values [0.0-1.0], agent i at 36 + 4i       │ <br>
+     * │ privateBeliefs (n * 4 B)│ Private values [0.0-1.0], agent i at 36 + 4n + 4i │ <br>
+     * │ (put(beliefBuffer) then put(belief) through one float view)                 │ <br>
      * ├─────────────────────────┼───────────────────────────────────────────────────┤ <br>
      * │ SPEAKING DATA (numberOfAgents bytes)                                        │ <br>
      * ├─────────────────────────┼───────────────────────────────────────────────────┤ <br>
-     * │ speakingState (1 byte)  │ 0 = silent, 1 = speaking for each agent           │ <br>
-     * │ ... (repeated for each agent)                                               │ <br>
+     * │ speakingState (n * 1 B) │ Agent i at 36 + 8n + i: 0 = silent, 1 = speaking  │ <br>
      * └─────────────────────────────────────────────────────────────────────────────┘
      *
      * Total packet size: 36 + (numberOfAgents * 9) bytes

@@ -1085,14 +1085,16 @@ paths:
           28-31  int32    round
           32-35  int32    startsAt        (index of the first agent in this partition)
 
-        Belief data (numberOfAgents × 8 bytes):
-          [publicBelief (float32), privateBelief (float32)] × n
+        Belief data (numberOfAgents × 8 bytes) — two consecutive blocks, NOT interleaved:
+          36            [publicBelief (float32)] × n    — agent i at 36 + 4i
+          36 + 4n       [privateBelief (float32)] × n   — agent i at 36 + 4n + 4i
 
         Speaking data (numberOfAgents × 1 byte):
-          [isSpeaking (uint8)] × n
+          36 + 8n       [isSpeaking (uint8)] × n        — agent i at 36 + 8n + i
         ```
 
-        Total per frame: `36 + 9 × numberOfAgents` bytes.
+        Total per frame: `36 + 9 × numberOfAgents` bytes. `n` = `numberOfAgents` and `i` is the
+        position inside the partition (global agent index = `startsAt + i`).
 
         **Partitioning.** One round may emit multiple frame binaries with different `startsAt`
         values (one per `AgentProcessor` actor). Each frame covers `[startsAt, startsAt + numberOfAgents)`.
