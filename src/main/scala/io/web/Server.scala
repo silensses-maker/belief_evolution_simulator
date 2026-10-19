@@ -243,7 +243,12 @@ object Server {
             }
         }
         
-        val apiRoute: Route = addCorsHeaders {
+        // Legacy anonymous binary endpoints (#85), REMOVED in #121. By default `legacyRoute` is
+        // `legacyGoneRoutes`: every method on /run, /custom and /neighbors (and on their /api
+        // mounts) answers 410 Gone, the body is discarded unread and nothing is started.
+        // `legacyRunRoutes` below is the pre-#121 behavior, mounted ONLY with
+        // APP_ENABLE_LEGACY_ROUTES=true (see legacyRoutesEnabled): dev/test only, never production.
+        val legacyRunRoutes: Route = addCorsHeaders {
             pathPrefix("run") {
                 post {
                     withDeprecation("/simulations/generated") {
@@ -285,7 +290,43 @@ object Server {
                 }
             }
         }
-        
+
+        // 410 Gone of a removed legacy endpoint (#121), whatever the method (the CORS preflight
+        // OPTIONS is still answered by corsHandler). Exact path only: /run/ and /run/x get the same
+        // answer as any unknown path. The Link targets are RELATIVE references, so the client
+        // resolves them against the URL it requested: /run → /simulations/generated, /api/run →
+        // /api/simulations/generated, also behind a reverse proxy that strips /api. The call is
+        // still recorded in legacy_endpoint_usage so remaining callers can be detected.
+        def legacyGone(segment: String, successor: String): Route =
+            path(segment) {
+                extractRequest { request =>
+                    optionalHeaderValueByName("User-Agent") { ua =>
+                        optionalHeaderValueByName("X-Forwarded-For") { xff =>
+                            // Never parsed. Discarded so the connection is not left back-pressured
+                            // (Akka closes it after this early answer if a large upload is still
+                            // arriving; small bodies keep the connection alive).
+                            request.discardEntityBytes()
+                            logLegacy(s"/$segment", ua, xff)
+                            complete(HttpResponse(
+                                StatusCodes.Gone,
+                                headers = List(RawHeader("Link",
+                                    s"""<$successor>; rel="successor-version", <docs>; rel="service-doc"""")),
+                                entity = errorJson("gone",
+                                    s"This legacy endpoint was removed; use POST /$successor (authenticated, see /docs)")
+                            ))
+                        }
+                    }
+                }
+            }
+
+        val legacyGoneRoutes: Route = addCorsHeaders {
+            legacyGone("run", "simulations/generated") ~
+            legacyGone("custom", "simulations/custom") ~
+            legacyGone("neighbors", "simulations/custom")
+        }
+
+        val legacyRoute: Route = if (legacyRoutesEnabled) legacyRunRoutes else legacyGoneRoutes
+
         // Shared by /api/users/sync and /api/users/info so both expose the same quotas.
         // Int.MaxValue (unlimited) is serialized as null.
         def usageLimitsJson(limits: DatabaseManager.UsageLimits): String = {
@@ -386,6 +427,12 @@ object Server {
             f"WS per-connection frame queue ${WsConnectionActor.dataBudgetBytes / 1048576.0}%.0f MB, " +
             s"ephemeral snapshot retention $EphemeralSnapshotRetentionMinutes min after the run ends")
         Logger.log(s"WS topology binary: ${if (wsSendsTopology) "sent (APP_WS_SEND_TOPOLOGY=true)" else "not sent (REST /topology only)"}")
+        if (legacyRoutesEnabled)
+            Logger.logWarning("APP_ENABLE_LEGACY_ROUTES=true: the removed legacy endpoints /run, /custom and " +
+                "/neighbors (and their /api mounts) are ENABLED: anonymous, without usage limits. " +
+                "Dev/test only, NEVER in production.")
+        else
+            Logger.log("Legacy endpoints /run, /custom, /neighbors: removed, they answer 410 Gone (#121)")
 
         // Periodic cleanup every 60 seconds
         import scala.concurrent.duration.*
@@ -841,9 +888,10 @@ object Server {
                           |  </head>
                           |  <body>
                           |    <h1>Simulation Server</h1>
-                          |    <p>API endpoint: POST /run</p>
-                          |    <p>Custom API endpoint: POST /custom</p>
-                          |    <p>WebSocket endpoint: ws://localhost:8080/ws</p>
+                          |    <p>API docs (Swagger UI): /docs &mdash; OpenAPI spec: /openapi.yaml</p>
+                          |    <p>Simulations (authenticated): POST /simulations/generated, POST /simulations/custom</p>
+                          |    <p>WebSocket endpoint: /ws</p>
+                          |    <p>Every path is also served under the /api prefix.</p>
                           |  </body>
                           |</html>
                             """.stripMargin))
@@ -851,7 +899,7 @@ object Server {
             }
         }
         
-        val baseRoutes: Route = corsHandler ~ webSocketRoute ~ apiRoute ~ userRoutes ~ simulationRoutes ~ docsRoute ~ homeRoute
+        val baseRoutes: Route = corsHandler ~ webSocketRoute ~ legacyRoute ~ userRoutes ~ simulationRoutes ~ docsRoute ~ homeRoute
         // Dual-mount: el reverse proxy del LIPN expone el backend bajo /api y
         // no controlamos si strippea el prefijo — aceptamos ambas formas
         // (/ws y /api/ws, /simulations y /api/simulations, etc.).
@@ -862,8 +910,8 @@ object Server {
             case scala.util.Success(binding) =>
                 val address = binding.localAddress
                 Logger.log(s"Server online at http://${address.getHostString}:${address.getPort}/")
-                Logger.log(s"API endpoint: http://${address.getHostString}:${address.getPort}/run")
-                Logger.log(s"Custom API endpoint: http://${address.getHostString}:${address.getPort}/custom")
+                Logger.log(s"API docs: http://${address.getHostString}:${address.getPort}/docs")
+                Logger.log(s"Simulations API: http://${address.getHostString}:${address.getPort}/simulations (authenticated)")
                 Logger.log(s"WebSocket endpoint: ws://${address.getHostString}:${address.getPort}/ws")
             case scala.util.Failure(ex) =>
                 Logger.log(s"Failed to bind server: ${ex.getMessage}")
@@ -1044,6 +1092,17 @@ object Server {
         s"""{"runId":"$runId","networkId":"$networkId","finalRound":${snap.finalRound},"consensus":${snap.consensus},"agentCount":${snap.agentCount},"offset":$off,"limit":$lim,"agents":[$agents]}"""
     }
 
+    /**
+     * Dev/test-only escape hatch of #121: with `APP_ENABLE_LEGACY_ROUTES=true` the removed legacy
+     * endpoints `POST /run`, `POST /custom` and `GET /neighbors` keep their pre-#121 behavior
+     * (anonymous, no usage limits, `/run` without bounds checks), e.g. to start a run in a throwaway
+     * container without a Firebase token. Off by default: they answer 410 Gone. NEVER enable it in
+     * production (docker-compose.prod.yml forces it to false); a WARNING is logged at startup when on.
+     */
+    val legacyRoutesEnabled: Boolean =
+        sys.env.get("APP_ENABLE_LEGACY_ROUTES").exists(_.trim.equalsIgnoreCase("true"))
+
+    // Headers of the legacy routes when APP_ENABLE_LEGACY_ROUTES=true (pre-#121 behavior, kept as is).
     private val deprecationSunset = "Tue, 01 Sep 2026 00:00:00 GMT"
 
     private def withDeprecation(successor: String): Directive0 =
@@ -1054,11 +1113,24 @@ object Server {
             RawHeader("Warning", s"""299 - "Deprecated API. Migrate to $successor." """)
         )
 
-    private def logLegacy(endpoint: String, userAgent: Option[String], ip: Option[String]): Unit =
+    // At most this many legacy_endpoint_usage inserts in flight (#121). The 410 answer is anonymous,
+    // so a flood of requests must not become one blocking JDBC call per request on the dispatcher;
+    // calls beyond the cap are not recorded (the table detects remaining callers, it does not count
+    // every call).
+    private val MaxLegacyLogsInFlight = 4
+    private val legacyLogsInFlight = new java.util.concurrent.atomic.AtomicInteger(0)
+
+    private def logLegacy(endpoint: String, userAgent: Option[String], forwardedFor: Option[String]): Unit =
         if (!GlobalState.APP_MODE.skipDatabase) {
-            import scala.concurrent.Future
-            implicit val ec: ExecutionContextExecutor = system.get.dispatcher
-            Future(DatabaseManager.logLegacyUsage(endpoint, None, userAgent, ip))
+            if (legacyLogsInFlight.incrementAndGet() > MaxLegacyLogsInFlight) legacyLogsInFlight.decrementAndGet()
+            else {
+                import scala.concurrent.Future
+                implicit val ec: ExecutionContextExecutor = system.get.dispatcher
+                // X-Forwarded-For can be a list ("client, proxy, ..."); the ip column is a single inet.
+                val ip = forwardedFor.flatMap(_.split(',').headOption).map(_.trim).filter(_.nonEmpty)
+                Future(DatabaseManager.logLegacyUsage(endpoint, None, userAgent, ip))
+                    .onComplete(_ => legacyLogsInFlight.decrementAndGet())
+            }
         }
 
     private def executeGeneratedRun(
@@ -1119,6 +1191,7 @@ object Server {
         runID
     }
 
+    // Legacy POST /run, mounted only with APP_ENABLE_LEGACY_ROUTES=true (#121). No bounds checks.
     private def parseGeneratedRun(data: Array[Byte]): String = {
         val saveMode = data(1)
         val agentTypeCount = data(2)
@@ -1340,8 +1413,9 @@ object Server {
     }
 
     /**
-     * Legacy POST /custom and GET /neighbors: run id as plain text, 400 JSON when malformed, 500 JSON
-     * when the run could not be saved (see startCustomRun).
+     * Legacy POST /custom and GET /neighbors, mounted only with APP_ENABLE_LEGACY_ROUTES=true (#121):
+     * run id as plain text, 400 JSON when malformed, 500 JSON when the run could not be saved (see
+     * startCustomRun).
      */
     private def legacyCustomRun(data: Array[Byte]): HttpResponse =
         decodeCustomRun(data) match {

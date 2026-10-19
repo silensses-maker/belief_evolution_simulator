@@ -76,6 +76,10 @@ services:
       # Tope (MB) de frames en cola por conexión WS y binario de topología por WS (#119)
       APP_WS_CONNECTION_BUFFER_MB: ${APP_WS_CONNECTION_BUFFER_MB:-}
       APP_WS_SEND_TOPOLOGY: ${APP_WS_SEND_TOPOLOGY:-false}
+      # Endpoints legacy /run, /custom, /neighbors (#121): fijo en false a propósito
+      # (responden 410 Gone) e independiente del .env. true los reactiva ANÓNIMOS y
+      # sin cuotas: es solo para dev/test y NUNCA debe activarse en producción.
+      APP_ENABLE_LEGACY_ROUTES: "false"
       JAVA_OPTS: ${BACKEND_JAVA_OPTS:-}
     volumes:
       # Ruta ABSOLUTA en el server al JSON del service account de Firebase.
