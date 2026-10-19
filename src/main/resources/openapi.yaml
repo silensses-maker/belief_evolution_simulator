@@ -12,6 +12,48 @@ info:
     endpoint, `/api/users/sync` and `/api/users/info/{uid}` included. Reactivation has no
     endpoint: an administrator sets `users.deactivated = false` in the database.
 
+    **Errors (#123).** Every non-2xx JSON answer has the body
+    `{"error": "<code>", "message": "<text>"}` (schema `Error`), plus `fields` on some
+    `400 invalid_body` answers, and carries the CORS headers — including the answers to unknown
+    paths, wrong methods, unreadable bodies and unexpected failures, which a global handler
+    produces for every path, with and without the `/api` prefix. `error` is stable; `message` is
+    for humans and may change.
+
+    | Status | `error` | When |
+    |---|---|---|
+    | 400 | `invalid_body` | the body is not JSON (`Malformed JSON: ...`), a member is missing or has the wrong type (`fields: [{"field": "agentTypes.count", "issue": "..."}]`; the path omits array indexes), the body is missing, a query parameter is malformed (`fields` names it), or an endpoint-specific check fails |
+    | 400 | `bad_request` | any other malformed request, e.g. `GET /ws` without a WebSocket upgrade |
+    | 401 | `unauthorized` | missing, invalid or expired token; deactivated account (`Account is deactivated`) |
+    | 401 | `token_revoked` | valid signature, but the session was revoked or the Firebase account is disabled or deleted: sign in again |
+    | 403 | `forbidden` | not the owner / not an Administrator |
+    | 404 | `not_found` | unknown path (any method) or unknown resource |
+    | 405 | `method_not_allowed` | known path, other method; the `Allow` header lists the methods |
+    | 406 | `not_acceptable` | the `Accept` header excludes every representation |
+    | 409 | `conflict` | e.g. cancelling a finished run |
+    | 410 | `gone` | removed legacy endpoint (see below) |
+    | 413 | `payload_too_large` | body above 64 MB (`akka.http.server.parsing.max-content-length`) |
+    | 415 | `unsupported_media_type` | a `Content-Type` the endpoint does not read |
+    | 422 | `usage_limit_exceeded` | role quota exceeded; adds `limit` and `requested` |
+    | 500 | `internal_error` | unexpected failure; logged server-side, the body never carries exception details |
+    | 503 | `request_timeout` | no answer within `akka.http.server.request-timeout` (60 s) |
+
+    Authentication runs before the body is read: a malformed body sent with a missing or invalid
+    token answers `401`, not `400`.
+
+    **Token verification (REST and WebSocket alike).** (1) The signature, `exp`, audience and
+    issuer are verified locally against Google's public keys; a failure is `401 unauthorized`
+    ("Invalid or expired token") and Firebase is not contacted. (2) Then the revocation check asks
+    Firebase for the user record: a token issued before the user's sessions were revoked
+    (`iat` < `tokensValidAfterTimestamp`), a disabled account or a deleted account answers
+    `401 token_revoked` (WebSocket: `auth_failed` with `reason: token_revoked`). A passed check of
+    a given token is reused for at most 5 minutes (never past its `exp`), so a revocation takes
+    effect within 5 minutes. **The revocation check fails open:** if it cannot run (network error,
+    3-second deadline, missing permission or credentials, Firebase outage), the token verified in
+    step 1 is accepted, reused for at most 60 seconds before the check is retried, and the server
+    logs a rate-limited warning; an outage of Firebase's user API therefore does not sign everybody
+    out, and revocations are not enforced while it lasts. A client that gets any `401` should
+    refresh its ID token once and retry, then sign in again.
+
     **Save modes:** `0` = FULL, `1` = STANDARD, `2` = STANDARD_LIGHT (`SaveModes.codeToSaveMode`;
     DEBUG — no per-agent DB writes — is internal code `7`).
     In this phase `saveMode` is required but ignored, by design (#133): while `APP_LEGACY_DB=false`
@@ -75,17 +117,134 @@ components:
       scheme: bearer
       bearerFormat: Firebase idToken
 
+  responses:
+    Unauthorized:
+      description: |
+        `unauthorized` — missing, malformed, invalid or expired token, or deactivated account
+        (`Account is deactivated`). `token_revoked` — the signature is valid but the session was
+        revoked or the Firebase account is disabled or deleted (checked with Firebase; a passed
+        check is reused for at most 5 minutes; the check fails open when Firebase cannot be
+        reached, see *Token verification*): sign in again.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            invalid:
+              value:
+                error: unauthorized
+                message: Invalid or expired token
+            missing:
+              value:
+                error: unauthorized
+                message: Missing Bearer token
+            revoked:
+              value:
+                error: token_revoked
+                message: The session was revoked or the account is disabled; sign in again
+            deactivated:
+              value:
+                error: unauthorized
+                message: Account is deactivated
+    NotFound:
+      description: "`not_found` — unknown path (any method, with or without `/api`) or unknown resource."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: not_found
+            message: The requested resource could not be found
+    MethodNotAllowed:
+      description: "`method_not_allowed` — the path exists but not with this method; see the `Allow` header."
+      headers:
+        Allow:
+          schema:
+            type: string
+          example: GET, OPTIONS
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: method_not_allowed
+            message: "HTTP method not allowed, supported methods: GET"
+    PayloadTooLarge:
+      description: "`payload_too_large` — the body exceeds 64 MB (`akka.http.server.parsing.max-content-length`)."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: payload_too_large
+            message: The request body exceeds the maximum allowed size of 67108864 bytes
+    UnsupportedMediaType:
+      description: "`unsupported_media_type` — a `Content-Type` this endpoint does not read."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: unsupported_media_type
+            message: "The request has Content-Type 'text/plain; charset=UTF-8'; expected: application/json"
+    InternalError:
+      description: "`internal_error` — unexpected server failure (logged server-side; no exception details in the body)."
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: internal_error
+            message: Internal server error
+
   schemas:
     Error:
       type: object
+      description: |
+        Body of every non-2xx JSON answer (#81, #123); see *Errors* in the API description for the
+        codes. `fields` appears only on some `400 invalid_body` answers; `limit` and `requested`
+        only on `422 usage_limit_exceeded`.
       required: [error, message]
       properties:
         error:
           type: string
-          example: forbidden
+          description: Stable machine-readable code.
+          example: invalid_body
         message:
           type: string
-          example: Admin role required
+          description: Human-readable explanation (not a stable identifier).
+          example: "Invalid request body: Expected Int as JsNumber, but got \"ten\""
+        fields:
+          type: array
+          description: |
+            The rejected inputs: `field` is the JSON path of a request-body member (outermost
+            member first, array indexes omitted, e.g. `agentTypes.count`) or the name of a query
+            parameter; `issue` says what is wrong with it.
+          items:
+            $ref: '#/components/schemas/FieldIssue'
+        limit:
+          type: integer
+          description: "`usage_limit_exceeded` only: the caller's quota."
+        requested:
+          type: integer
+          description: "`usage_limit_exceeded` only: the requested value."
+      example:
+        error: invalid_body
+        message: "Invalid request body: Expected Int as JsNumber, but got \"ten\""
+        fields:
+          - field: agentTypes.count
+            issue: "Expected Int as JsNumber, but got \"ten\""
+
+    FieldIssue:
+      type: object
+      required: [field, issue]
+      properties:
+        field:
+          type: string
+          example: agentTypes.count
+        issue:
+          type: string
+          example: "Expected Int as JsNumber, but got \"ten\""
 
     UsageLimits:
       type: object
@@ -439,11 +598,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/UserInfo'
         '401':
-          description: Missing or invalid token
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+          $ref: '#/components/responses/Unauthorized'
 
   /api/users/info/{uid}:
     get:
@@ -463,6 +618,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/UserInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           description: Forbidden
           content:
@@ -502,16 +659,7 @@ paths:
                     type: boolean
                     example: true
         '401':
-          description: Missing or invalid token, or account already deactivated
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-              examples:
-                deactivated:
-                  value:
-                    error: unauthorized
-                    message: Account is deactivated
+          $ref: '#/components/responses/Unauthorized'
         '500':
           description: The account could not be updated
           content:
@@ -560,6 +708,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           description: Forbidden
           content:
@@ -617,11 +767,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '422':
           description: |
             `usage_limit_exceeded` — agents per network, `iterationLimit` or `numberOfNetworks`
@@ -735,17 +885,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '401':
-          description: Unauthorized
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
+          $ref: '#/components/responses/Unauthorized'
         '403':
           description: "`forbidden` — `frameRetention=persistent` requested by a non-Administrator."
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
         '422':
           description: |
             `usage_limit_exceeded` (JSON and binary variants) — the agent count or
@@ -794,6 +944,8 @@ paths:
                     type: integer
                   offset:
                     type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
   /simulations:
     get:
@@ -826,6 +978,8 @@ paths:
                     type: integer
                   offset:
                     type: integer
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           description: Forbidden
           content:
@@ -852,6 +1006,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RunSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           description: Forbidden
           content:
@@ -894,6 +1050,8 @@ paths:
                     type: string
                   cancelled:
                     type: boolean
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           description: Forbidden
           content:
@@ -960,6 +1118,8 @@ paths:
                     items:
                       type: string
                       format: uuid
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           description: Forbidden
         '404':
@@ -1092,6 +1252,16 @@ paths:
           description: |
             Topology not available — retry after `topology_ready` while the run is `running`; for a
             finished run the snapshot is no longer retained.
+        '400':
+          description: |
+            `invalid_body` — a pagination parameter is negative or not an integer (`fields`
+            names each one).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           description: Forbidden
         '404':
@@ -1172,6 +1342,16 @@ paths:
           description: |
             Results not available — retry after `network_converged` while the run is `running`; for
             a finished run the snapshot is no longer retained.
+        '400':
+          description: |
+            `invalid_body` — `offset` or `limit` is negative or not an integer (`fields` names
+            each one).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           description: Forbidden
         '404':
@@ -1233,6 +1413,8 @@ paths:
                 format: binary
         '400':
           description: Invalid range or `range_too_large`
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           description: Forbidden
         '404':
@@ -1251,8 +1433,15 @@ paths:
         ## Handshake (client → server, first message)
 
         Auth must be the very first message. Until it succeeds, a well-formed `subscribe` /
-        `unsubscribe` is ignored and answered with `{"type": "error", "code": "auth_required"}`;
-        an invalid token closes the connection right after the `auth_failed` error below.
+        `unsubscribe` is ignored and answered with `{"type": "error", "code": "auth_required"}`.
+        A failed auth gets the `auth_failed` error below, and then the server closes the
+        connection with a normal closure (close code `1000`). Akka HTTP 10.5 cannot send a custom
+        close code such as `1008` from the server; a client should treat this close like a policy
+        violation and not reconnect with the same token (the SiLEnSeSS frontend does not retry on
+        `1000` or `1008`).
+
+        The token is verified exactly as on REST, revocation check included (#123): see *Errors*
+        in the API description.
 
         ```json
         {"type": "auth", "token": "<Firebase idToken>"}
@@ -1265,7 +1454,13 @@ paths:
         or on failure:
         ```json
         {"type": "error", "code": "auth_failed"}
+        {"type": "error", "code": "auth_failed", "reason": "token_revoked"}
+        {"type": "error", "code": "auth_failed", "reason": "account_deactivated"}
         ```
+        `reason` is present only when a token with a VALID signature is refused: `token_revoked`
+        (revoked session, or disabled or deleted Firebase account; same fail-open check as REST) or
+        `account_deactivated` (deactivated in the database, like the REST
+        `401 "Account is deactivated"`). An invalid or expired token gets no `reason`.
 
         ## Subscribe to a run (client → server)
 

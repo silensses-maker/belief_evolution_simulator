@@ -49,6 +49,15 @@ libraryDependencies += "com.typesafe.akka" %% "akka-http" % AkkaHttpVersion
 libraryDependencies += "com.typesafe.akka" %% "akka-http-spray-json" % AkkaHttpVersion
 libraryDependencies += "com.typesafe.akka" %% "akka-stream" % AkkaVersion
 
+// Tests (#123): `sbt test` runs src/test/scala (munit; route tests with Akka HTTP's testkit, same
+// versions as the runtime). Test scope only: not part of `sbt stage` / the production image.
+libraryDependencies ++= Seq(
+    "org.scalameta"     %% "munit"               % "1.0.0"         % Test,
+    "com.typesafe.akka" %% "akka-http-testkit"   % AkkaHttpVersion % Test,
+    "com.typesafe.akka" %% "akka-stream-testkit" % AkkaVersion     % Test,
+    "com.typesafe.akka" %% "akka-testkit"        % AkkaVersion     % Test
+)
+
 // Logging
 libraryDependencies ++= Seq(
     "org.apache.logging.log4j" % "log4j-api" % "2.25.0",
