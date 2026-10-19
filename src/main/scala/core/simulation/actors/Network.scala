@@ -414,7 +414,7 @@ class Network(networkId: UUID, runMetadata: RunMetadata,
                 round += 1
                 SimulationCache.storeTopology(runMetadata.runID, networkId.toString, buildTopologySnapshot())
                 if (!GlobalState.APP_MODE.skipWS) {
-                    sendNeighbors()
+                    if (Server.wsSendsTopology) sendNeighbors()
                     Server.sendControlEvent(runMetadata.runID,
                         s"""{"event":"topology_ready","runId":"${runMetadata.runID}","networkId":"$networkId"}""")
                 }
@@ -445,7 +445,7 @@ class Network(networkId: UUID, runMetadata: RunMetadata,
                     SimulationCache.storeResults(runMetadata.runID, networkId.toString, buildResultsSnapshot(round, consensus = true))
                     context.parent ! RunningComplete(networkId, round, 1)
                     Server.sendControlEvent(runMetadata.runID,
-                        s"""{"event":"network_converged","runId":"${runMetadata.runID}","networkId":"$networkId","round":$round,"consensus":true}""")
+                        s"""{"event":"network_converged","runId":"${runMetadata.runID}","networkId":"$networkId","finalRound":$round,"consensus":true}""")
                     if (runMetadata.saveMode.includesNetworks) DatabaseManager.updateNetworkFinalRound(networkId, round, true)
                     if (runMetadata.saveMode.includesLastRound) agents.foreach { agent => agent ! SnapShotAgent }
 
@@ -458,7 +458,7 @@ class Network(networkId: UUID, runMetadata: RunMetadata,
                     SimulationCache.storeResults(runMetadata.runID, networkId.toString, buildResultsSnapshot(round, consensus = false))
                     context.parent ! RunningComplete(networkId, round, 0)
                     Server.sendControlEvent(runMetadata.runID,
-                        s"""{"event":"network_converged","runId":"${runMetadata.runID}","networkId":"$networkId","round":$round,"consensus":false}""")
+                        s"""{"event":"network_converged","runId":"${runMetadata.runID}","networkId":"$networkId","finalRound":$round,"consensus":false}""")
                     if (runMetadata.saveMode.includesNetworks) DatabaseManager.updateNetworkFinalRound(networkId, round, false)
                     if (runMetadata.saveMode.includesLastRound) agents.foreach { agent => agent ! SnapShotAgent }
                     if (finishState == 0) context.stop(self)
@@ -564,7 +564,8 @@ class Network(networkId: UUID, runMetadata: RunMetadata,
     
     /**
      * Emits the network topology snapshot as a binary WS frame, once per network, before
-     * `topology_ready`.
+     * `topology_ready`. Only called when `Server.wsSendsTopology` (`APP_WS_SEND_TOPOLOGY=true`,
+     * off by default since #119), so the buffer is not even built otherwise.
      *
      * Wire format (little-endian):
      *

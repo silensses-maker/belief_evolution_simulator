@@ -40,7 +40,9 @@ info:
     min(512 MB, heap/8)) and `APP_WS_BUFFER_BUDGET_MB` (WS buffers of all runs, default
     min(1024 MB, heap/4)); when a cap is exceeded the oldest **finished** runs are evicted first and
     running runs never are (WS buffers then drop the oldest binary frames of the largest running
-    buffer; control events are never dropped). **A backend restart loses everything in memory**:
+    buffer; control events are never dropped). Each WS connection also caps the binary frames queued
+    for it and not yet sent at `APP_WS_CONNECTION_BUFFER_MB` (default min(32 MB, heap/64); see
+    `/ws`). **A backend restart loses everything in memory**:
     `/networks` then falls back to the networks that still have persisted frames, while `/topology`
     and `/results` answer `202` (the snapshot will not come back). Runs left `running` by the
     previous process are set to `error` at startup.
@@ -1238,8 +1240,9 @@ paths:
 
         ## Handshake (client → server, first message)
 
-        Auth must be the very first message. The server closes the connection if it
-        receives anything else or if the token is invalid.
+        Auth must be the very first message. Until it succeeds, a well-formed `subscribe` /
+        `unsubscribe` is ignored and answered with `{"type": "error", "code": "auth_required"}`;
+        an invalid token closes the connection right after the `auth_failed` error below.
 
         ```json
         {"type": "auth", "token": "<Firebase idToken>"}
@@ -1279,6 +1282,16 @@ paths:
         first (oldest first; their subscribers get the DB replay), then the oldest frames of the
         largest running buffer are dropped.
 
+        **Per-connection outbound queue.** Each connection hands the socket one message at a time and
+        queues the rest. Control events (JSON text) are never dropped there either. Binary frames
+        are capped per connection by `APP_WS_CONNECTION_BUFFER_MB` (default min(32 MB, heap/64)):
+        when the client reads slower than frames arrive — or a large buffer drain exceeds the cap —
+        the oldest queued frames are dropped (the server logs it, at most every 10 s per
+        connection); fetch missed rounds from `GET /frames`. Messages that are delivered always keep
+        their original order. If a client stops reading altogether and 1 000 000 control events pile
+        up, the server closes the connection with code `1011` instead of dropping one; reconnect
+        and resubscribe.
+
         **If the run is still running:** the server registers the connection, drains the
         buffer (any events emitted before subscribe), and live events continue to flow.
 
@@ -1286,10 +1299,13 @@ paths:
         in the same order as live emission — see "Live event order per network" below.
         After 60 minutes the buffer is gone and the server falls back to DB replay, for every
         network that has persisted frames (`network_frames.run_id`): `topology_ready` →
-        `network_started` → frame binaries if `persistFrames=true` → `network_converged` (only
-        while the results snapshot is still in memory) → `run_completed`, or the `error` event if
-        the run's status is `error`. The topology binary is **not** replayed from DB — fetch it via
-        `GET /topology` while it is retained.
+        `network_started` → its frame binaries → `network_converged` (only while the results
+        snapshot is still in memory); then `run_completed`, or the `error` event if the run's
+        status is `error`. Frames are sent exactly as live: **one binary message per persisted frame
+        partition**, in `(round, startsAt)` order. The replay is paced by the connection (the next
+        page of frames is read from the DB only once the outbound queue has drained to half its
+        cap), so it does not drop frames on a client that keeps reading. No topology binary is
+        replayed — fetch the topology via `GET /topology` while it is retained.
 
         **If the run does not exist:**
         ```json
@@ -1302,16 +1318,36 @@ paths:
         {"type": "unsubscribe", "runId": "<runId>"}
         ```
 
+        ## Malformed client messages
+
+        A client message the server cannot read — not JSON, not a JSON object, `type` missing, not
+        a string or unknown, `token` / `runId` missing or not a string, `runId` not a decimal int64,
+        a text longer than 65 536 characters, or any binary message — is answered with (before or
+        after auth):
+        ```json
+        {"type": "error", "code": "invalid_message", "message": "subscribe: \"runId\" must be a string"}
+        ```
+        `message` is a short human-readable reason, not a stable identifier. The message is
+        otherwise ignored and **the connection keeps its state** (authentication, subscriptions):
+        since #119 malformed input no longer resets it. A text sent in several WebSocket frames is
+        reassembled before it is read. A repeated `auth` on an authenticated connection is ignored.
+        If the server fails unexpectedly while handling a well-formed message (e.g. no database
+        connection), it answers `{"type": "error", "code": "internal_error"}` and also keeps the
+        connection.
+
         ## Live event order per network
 
         For each network in the run, in this exact order:
 
-        1. **Topology binary** (one frame, 32-byte header) — full adjacency in CSR layout.
-        2. `topology_ready` JSON event.
-        3. `network_started` JSON event.
-        4. **Frame binary** (one per `AgentProcessor` per round, 36-byte header) — repeated
+        1. `topology_ready` JSON event — the topology is ready at
+           `GET /simulations/{runId}/networks/{networkId}/topology`.
+        2. `network_started` JSON event.
+        3. **Frame binary** (one per `AgentProcessor` per round, 36-byte header) — repeated
            until convergence or iteration limit.
-        5. `network_converged` JSON event.
+        4. `network_converged` JSON event.
+
+        Only with `APP_WS_SEND_TOPOLOGY=true` the **topology binary** (32-byte header, below) is
+        also sent, right before `topology_ready`.
 
         After every network finishes, the run emits `run_completed`. If the run fails instead, it
         emits `error` (and its status becomes `error`); no `run_completed` follows.
@@ -1321,24 +1357,30 @@ paths:
         ```json
         {"event": "topology_ready",    "runId": "...", "networkId": "..."}
         {"event": "network_started",   "runId": "...", "networkId": "..."}
-        {"event": "network_converged", "runId": "...", "networkId": "...", "round": 10, "consensus": true}
+        {"event": "network_converged", "runId": "...", "networkId": "...", "finalRound": 10, "consensus": true}
         {"event": "run_completed",     "runId": "..."}
         {"event": "error",             "runId": "...", "code": "run_failed", "message": "Simulation failed: ..."}
         ```
+
+        `finalRound` is the network's last round (the `finalRound` of `GET /results`), with the same
+        name on the live path and in the DB replay. Backends before #119 named it `round` on the
+        live path; a client that must support them can fall back to `round`.
 
         `error` is terminal for the run: an actor of the run failed, the run was stopped and its status
         is `error`. `message` is a short human-readable reason. Runs killed by a backend restart are
         not notified live (the connection is gone); they show `error` in `GET /simulations/{runId}`
         and in the DB replay.
 
-        On `topology_ready`, the network topology is already in your buffer as the preceding
-        binary message; you can also fetch it via `GET /simulations/{runId}/networks/{networkId}/topology`
-        if you missed it.
+        On `topology_ready`, fetch the topology via
+        `GET /simulations/{runId}/networks/{networkId}/topology` (it is cached at that moment).
 
-        ## Topology binary (server → client, one per network)
+        ## Topology binary (server → client, off by default)
 
-        Full adjacency snapshot in CSR (Compressed Sparse Row) layout. Emitted once per
-        network, immediately before `topology_ready`. Little-endian throughout.
+        Full adjacency snapshot in CSR (Compressed Sparse Row) layout. **Sent only when the backend
+        runs with `APP_WS_SEND_TOPOLOGY=true`** — off by default since #119: clients read the
+        topology from `GET /topology`, and this message weighs several MB per large network on the
+        socket and in the run's replay buffer. When enabled it is emitted once per network, right
+        before `topology_ready`. Little-endian throughout.
 
         ```
         Header (32 bytes):
@@ -1397,23 +1439,22 @@ paths:
         values (one per `AgentProcessor` actor). Each frame covers `[startsAt, startsAt + numberOfAgents)`.
         Merge partitions by `(runId, networkId, round)` before treating a round as complete.
 
-        ## Discriminating binaries
+        ## Binary messages
 
-        Both topology and frame share the same WS channel. Discriminate by header bytes
-        24-27 vs 28-31, or by total payload size:
+        With the default configuration **round frames are the only binary messages** on the
+        socket. Validate each one anyway: `byteLength == 36 + 9 × numberOfAgents` with
+        `numberOfAgents > 0`, `round >= 0` and `startsAt >= 0`; drop anything else.
 
-        - Topology frame: `numberOfAgents` at bytes 24-27, `numberOfNeighbors` at 28-31. The
-          payload after the 32-byte header is `n*4 + m*9` bytes.
-        - Round frame: `numberOfAgents` at bytes 24-27, `round` at 28-31, `startsAt` at 32-35.
-          The payload after the 36-byte header is `9 × numberOfAgents` bytes.
-
-        A simple discriminator: if total bytes equals `36 + 9 × numberOfAgents` it's a round
-        frame; otherwise it's the topology frame for that network. In practice, the topology
-        always arrives once, immediately before `topology_ready`.
+        With `APP_WS_SEND_TOPOLOGY=true` the topology binary shares the channel and the size alone
+        is ambiguous: `32 + 4n + 9m == 36 + 9n` whenever `9m = 5n + 4` (e.g. 10 agents / 6 edges),
+        and its header (`numberOfNeighbors` at 28-31, `indexOffset[0]` at 32-35) then passes the
+        checks above too. Clients that enable it must discriminate by order instead: both carry the
+        networkId at bytes 0-15, and per network the topology binary comes before that network's
+        `topology_ready`, while its frames only come after its `network_started`.
 
         **Multiplexing with JSON.** Binary and JSON frames share the same connection.
         Discriminate by `typeof event.data`: `"string"` → JSON control event; otherwise →
-        binary (topology or round frame).
+        binary (a round frame, or the topology binary when enabled).
 
         **Bandwidth example.** 100 k agents at 30 Hz, 4 partitions of 25 k:
         `4 × (36 + 9 × 25 000) ≈ 900 KB/s` of round frames.
@@ -1421,7 +1462,9 @@ paths:
         ## Reconnect
 
         On reconnect: re-send `auth`, then re-subscribe to any active runs.
-        The server replays topology and (if `persistFrames`) frames from the point of reconnect.
+        Each subscribe drains the run's replay buffer (or the DB replay) again — see "Replay
+        buffer" — so the client gets the run's events from the start, minus any frames dropped by
+        the caps.
 
         ## Multiple tabs
 

@@ -9,7 +9,7 @@ import akka.http.scaladsl.model.{ContentType, ContentTypes, HttpCharsets, HttpEn
 import akka.http.scaladsl.server.Directives.*
 import akka.http.scaladsl.server.{Directive0, Route}
 import akka.http.scaladsl.unmarshalling.{FromEntityUnmarshaller, Unmarshaller}
-import akka.stream.{Materializer, OverflowStrategy}
+import akka.stream.Materializer
 import akka.stream.scaladsl.{Flow, Sink, Source}
 import akka.util.ByteString
 import io.web.ws.{ConnectionClosed, Dispatch, WsConnectionActor, WsRegistry}
@@ -218,16 +218,26 @@ object Server {
         val webSocketRoute: Route = addCorsHeaders {
             path("ws") {
                 get {
-                    val (outRef, outSource) = Source.actorRef[Message](
+                    // Backpressured outbound (#119): the source holds ONE element and acks it once
+                    // emitted; WsConnectionActor queues the rest (control events never dropped,
+                    // binary frames bounded by APP_WS_CONNECTION_BUFFER_MB) and sends the next on
+                    // each ack. FailOutbound closes the socket (1011) when the client stops reading.
+                    val (outRef, outSource) = Source.actorRefWithBackpressure[Message](
+                        ackMessage        = WsConnectionActor.OutboundAck,
                         completionMatcher = PartialFunction.empty,
-                        failureMatcher    = PartialFunction.empty,
-                        bufferSize        = 256,
-                        overflowStrategy  = OverflowStrategy.dropHead
+                        failureMatcher    = {
+                            case WsConnectionActor.FailOutbound(reason) =>
+                                new IllegalStateException(s"WS outbound closed: $reason")
+                        }
                     ).preMaterialize()
                     val connActor = system.get.actorOf(
                         akka.actor.Props(new WsConnectionActor(outRef)))
-                    val inSink = Sink.actorRef[Message](
-                        connActor, ConnectionClosed, _ => ConnectionClosed)
+                    // Inbound (#119): every client message reaches the actor in order as a strict
+                    // text or an UnreadableClientMessage — streamed texts are read to the end (up to
+                    // MaxClientMessageChars) and binaries drained, so nothing stalls the socket.
+                    val inSink = Flow[Message]
+                        .mapAsync(1)(msg => WsConnectionActor.readClientMessage(msg))
+                        .to(Sink.actorRef[Any](connActor, ConnectionClosed, _ => ConnectionClosed))
                     handleWebSocketMessages(Flow.fromSinkAndSource(inSink, outSource))
                 }
             }
@@ -373,7 +383,9 @@ object Server {
             Logger.log(s"Startup reconciliation: $reconciled run(s) left 'running' by a previous process set to 'error'")
         Logger.log(f"In-memory run stores: SimulationCache budget ${SimulationCache.budgetBytes / 1048576.0}%.0f MB, " +
             f"WS buffer budget ${WsRegistry.globalBudgetBytes / 1048576.0}%.0f MB, " +
+            f"WS per-connection frame queue ${WsConnectionActor.dataBudgetBytes / 1048576.0}%.0f MB, " +
             s"ephemeral snapshot retention $EphemeralSnapshotRetentionMinutes min after the run ends")
+        Logger.log(s"WS topology binary: ${if (wsSendsTopology) "sent (APP_WS_SEND_TOPOLOGY=true)" else "not sent (REST /topology only)"}")
 
         // Periodic cleanup every 60 seconds
         import scala.concurrent.duration.*
@@ -909,6 +921,7 @@ object Server {
     
     /**
      * Broadcasts neighbor topology data to all WebSocket clients connected to a specific channel.
+     * No-op unless [[wsSendsTopology]] (`APP_WS_SEND_TOPOLOGY=true`, off by default since #119).
      *
      * Receives the binary packet created by Network.sendNeighbors() and distributes it to all
      * connected WebSocket clients for that simulation run. This enables real-time visualization
@@ -950,9 +963,18 @@ object Server {
      * @param buffer Binary packet containing network topology data (created by Network.sendNeighbors)
      */
     def sendNeighborBinaryData(runId: Long, buffer: ByteBuffer): Unit = {
-        if (!initialized) return
+        if (!initialized || !wsSendsTopology) return
         WsRegistry.dispatchBinary(runId, ByteString(buffer))
     }
+
+    /**
+     * Whether the topology binary above is sent over the WebSocket (#119): off by default, on with
+     * `APP_WS_SEND_TOPOLOGY=true`. Clients read the topology from REST `GET /topology` (cached at
+     * `topology_ready`, which is still emitted); the binary costs several MB per network on the
+     * socket and in the run's replay buffer, and its size `32 + 4n + 9m` equals a frame's
+     * `36 + 9n` whenever `9m = 5n + 4`, so with it off frames are the only binary messages.
+     */
+    val wsSendsTopology: Boolean = sys.env.get("APP_WS_SEND_TOPOLOGY").exists(_.trim.equalsIgnoreCase("true"))
 
     def sendControlEvent(runId: Long, json: String): Unit = {
         if (!initialized) return
