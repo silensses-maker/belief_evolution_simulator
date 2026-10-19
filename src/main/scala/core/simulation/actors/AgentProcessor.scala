@@ -207,7 +207,8 @@ class AgentProcessor(
             val lower = tolOffset(i)
             val initialBelief = belief(i)
             var j = if (i > 0) indexOffset(i - 1) else 0
-            val currentBias = neighborBiases(j)
+            // Agent with an empty neighbor range (nobody it listens to; j may equal edgeCount): avoid reading past the end (#131)
+            val currentBias = if (j < indexOffset(i)) neighborBiases(j) else CognitiveBiases.DEGROOT
             val skipSIMD = canSIMD.contains(i) // Skips SIMD if agents have neighbors with multiple different biases
             val endLoopSIMD = indexOffset(i) - speciesLength
             
