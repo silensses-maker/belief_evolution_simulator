@@ -7,6 +7,11 @@ info:
 
     All protected endpoints require `Authorization: Bearer <Firebase idToken>`.
 
+    **Deactivated accounts** (`POST /api/users/me/deactivate`) get
+    `401 {"error": "unauthorized", "message": "Account is deactivated"}` on every protected REST
+    endpoint, `/api/users/sync` and `/api/users/info/{uid}` included. Reactivation has no
+    endpoint: an administrator sets `users.deactivated = false` in the database.
+
     **Save modes:** `0` = FULL (persists to DB), `1` = PARTIAL, `2` = DEBUG (no DB writes — use in dev).
 
     **Silence strategies:** `0` = DEGROOT, `1` = MAJORITY, `2` = THRESHOLD, `3` = CONFIDENCE
@@ -419,6 +424,52 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /api/users/me/deactivate:
+    post:
+      tags: [Users]
+      summary: Deactivate own account
+      description: |
+        Sets `deactivated = true` for the authenticated user (the account comes from the token;
+        no body). Idempotent: it changes nothing else, and a repeated call is either another `200`
+        (concurrent) or the `401` every deactivated account gets.
+
+        From then on every protected REST call of the account (this one included) is rejected
+        with `401 {"error": "unauthorized", "message": "Account is deactivated"}`; the Firebase
+        account itself is untouched. Reactivation has no endpoint: an administrator sets
+        `users.deactivated = false` in the database.
+      responses:
+        '200':
+          description: Account deactivated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deactivated]
+                properties:
+                  deactivated:
+                    type: boolean
+                    example: true
+        '401':
+          description: Missing or invalid token, or account already deactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                deactivated:
+                  value:
+                    error: unauthorized
+                    message: Account is deactivated
+        '500':
+          description: The account could not be updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: internal_error
+                message: Failed to deactivate account
 
   /api/users/role/{uid}/{role}:
     put:

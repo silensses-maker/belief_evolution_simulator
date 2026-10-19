@@ -505,6 +505,28 @@ object DatabaseManager {
         }
     }
 
+    /**
+     * Sets `deactivated = true` (idempotent: an already deactivated row is still a success).
+     * `false` when the row does not exist or the update fails. Reactivation has no endpoint:
+     * an administrator sets `deactivated = false` in the database.
+     */
+    def deactivateUser(userId: Int): Boolean = {
+        val connection = getConnection
+        try {
+            val stmt = connection.prepareStatement(
+                "UPDATE users SET deactivated = true, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+            )
+            stmt.setInt(1, userId)
+            stmt.executeUpdate() > 0
+        } catch {
+            case ex: Exception =>
+                Logger.logError(s"Error deactivating user $userId: ${ex.getMessage}")
+                false
+        } finally {
+            connection.close()
+        }
+    }
+
     def addUserRole(firebaseUid: String, role: String): Boolean = {
         val connection = getConnection
         try {

@@ -262,11 +262,13 @@ object Server {
                     post {
                         authenticate { authUser =>
                             val limits = DatabaseManager.getUsageLimits(authUser.roles)
+                            // email/name/photo come from the token (the name is user-editable in
+                            // Firebase Auth): JSON-escape them.
                             val responseJson = s"""{
                               |  "uid": "${authUser.uid}",
-                              |  "email": "${authUser.email}",
-                              |  "name": "${authUser.name}",
-                              |  "photo": ${authUser.photo.map(p => s""""$p"""").getOrElse("null")},
+                              |  "email": ${JsString(authUser.email).compactPrint},
+                              |  "name": ${JsString(authUser.name).compactPrint},
+                              |  "photo": ${authUser.photo.map(p => JsString(p).compactPrint).getOrElse("null")},
                               |  "roles": [${authUser.roles.map(r => s""""$r"""").mkString(",")}],
                               |  "usageLimits": ${usageLimitsJson(limits)},
                               |  "deactivated": false
@@ -286,7 +288,7 @@ object Server {
                                         val rolesJson = user.roles.map(r => s""""$r"""").mkString(",")
                                         val limitsJson = usageLimitsJson(DatabaseManager.getUsageLimits(user.roles))
                                         complete(StatusCodes.OK -> HttpEntity(ContentTypes.`application/json`,
-                                            s"""{"uid":"${user.firebaseUid}","email":"${user.email}","name":"${user.name}","roles":[$rolesJson],"usageLimits":$limitsJson,"deactivated":${user.deactivated}}"""))
+                                            s"""{"uid":"${user.firebaseUid}","email":${JsString(user.email).compactPrint},"name":${JsString(user.name).compactPrint},"roles":[$rolesJson],"usageLimits":$limitsJson,"deactivated":${user.deactivated}}"""))
                                     case None =>
                                         complete(StatusCodes.NotFound ->
                                             errorJson("not_found", "User not found"))
@@ -294,6 +296,23 @@ object Server {
                             } else {
                                 complete(StatusCodes.Forbidden ->
                                     errorJson("forbidden", "Cannot access another user's info"))
+                            }
+                        }
+                    }
+                } ~
+                // POST /api/users/me/deactivate — authenticated; deactivates the caller's own account
+                // (idempotent). From then on `authenticate` answers 401 "Account is deactivated" to
+                // every REST call of the account; reactivation is manual (an admin, in the database).
+                path("me" / "deactivate") {
+                    post {
+                        authenticate { authUser =>
+                            if (DatabaseManager.deactivateUser(authUser.dbUserId)) {
+                                Logger.log(s"User deactivated: ${authUser.uid}")
+                                complete(StatusCodes.OK -> HttpEntity(ContentTypes.`application/json`,
+                                    """{"deactivated":true}"""))
+                            } else {
+                                complete(StatusCodes.InternalServerError ->
+                                    errorJson("internal_error", "Failed to deactivate account"))
                             }
                         }
                     }
