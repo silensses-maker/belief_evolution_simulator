@@ -2,14 +2,13 @@ package io.web
 
 import akka.actor.{ActorRef, ActorSystem}
 import akka.http.scaladsl.Http
-import akka.http.scaladsl.model.HttpMethods.{DELETE, GET, OPTIONS, POST, PUT}
 import akka.http.scaladsl.model.headers.*
 import akka.http.scaladsl.model.ws.{BinaryMessage, Message, TextMessage}
 import akka.http.scaladsl.model.{ContentType, ContentTypes, HttpCharsets, HttpEntity, HttpResponse, MediaType, MediaTypes, StatusCodes}
 import akka.http.scaladsl.server.Directives.*
 import akka.http.scaladsl.server.{Directive0, Route}
 import akka.http.scaladsl.unmarshalling.{FromEntityUnmarshaller, Unmarshaller}
-import akka.stream.Materializer
+import akka.stream.{CompletionStrategy, Materializer}
 import akka.stream.scaladsl.{Flow, Sink, Source}
 import akka.util.ByteString
 import io.web.ws.{ConnectionClosed, Dispatch, WsConnectionActor, WsRegistry}
@@ -25,7 +24,10 @@ import core.simulation.config.SaveModes.SaveMode
 import utils.logging.Logger
 import io.db.DatabaseManager
 import io.web.auth.ErrorResponses.*
+import io.web.auth.{FieldIssue, TokenVerifier}
 import io.web.auth.FirebaseAuthDirective.{authenticate, requireAdmin}
+import io.web.json.ApiJson
+import io.web.ws.WsEvents
 import utils.datastructures.SnowflakeID
 import utils.rng.distributions.Uniform
 import spray.json.*
@@ -197,23 +199,11 @@ object Server {
         val serverHost = sys.env.getOrElse("SERVER_HOST", "0.0.0.0")
         val serverPort = sys.env.getOrElse("SERVER_PORT", "8080").toInt
 
-        val corsResponseHeaders = List(
-            `Access-Control-Allow-Origin`.*,
-            `Access-Control-Allow-Methods`(POST, GET, PUT, DELETE, OPTIONS),
-            `Access-Control-Allow-Headers`("Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"),
-            `Access-Control-Max-Age`(86400),
-            `Access-Control-Allow-Credentials`(false)
-        )
-        
-        def addCorsHeaders: Directive0 = {
-            respondWithHeaders(corsResponseHeaders)
-        }
-        
-        val corsHandler: Route = addCorsHeaders {
-            options {
-                complete(HttpResponse(StatusCodes.OK))
-            }
-        }
+        // CORS headers and the global OPTIONS preflight live in Cors (#123), shared with the
+        // global error handlers (ErrorHandling) so error answers carry the same headers.
+        def addCorsHeaders: Directive0 = Cors.addCorsHeaders
+
+        val corsHandler: Route = Cors.preflight
         
         val webSocketRoute: Route = addCorsHeaders {
             path("ws") {
@@ -221,10 +211,13 @@ object Server {
                     // Backpressured outbound (#119): the source holds ONE element and acks it once
                     // emitted; WsConnectionActor queues the rest (control events never dropped,
                     // binary frames bounded by APP_WS_CONNECTION_BUFFER_MB) and sends the next on
-                    // each ack. FailOutbound closes the socket (1011) when the client stops reading.
+                    // each ack. FailOutbound closes the socket (1011) when the client stops reading;
+                    // CompleteOutbound closes it normally (1000) after an auth failure (#123).
                     val (outRef, outSource) = Source.actorRefWithBackpressure[Message](
                         ackMessage        = WsConnectionActor.OutboundAck,
-                        completionMatcher = PartialFunction.empty,
+                        completionMatcher = {
+                            case WsConnectionActor.CompleteOutbound => CompletionStrategy.draining
+                        },
                         failureMatcher    = {
                             case WsConnectionActor.FailOutbound(reason) =>
                                 new IllegalStateException(s"WS outbound closed: $reason")
@@ -327,12 +320,10 @@ object Server {
 
         val legacyRoute: Route = if (legacyRoutesEnabled) legacyRunRoutes else legacyGoneRoutes
 
-        // Shared by /api/users/sync and /api/users/info so both expose the same quotas.
-        // Int.MaxValue (unlimited) is serialized as null.
-        def usageLimitsJson(limits: DatabaseManager.UsageLimits): String = {
-            def cap(value: Int): String = if (value == Int.MaxValue) "null" else value.toString
-            s"""{"maxAgents":${cap(limits.maxAgents)},"maxIterations":${cap(limits.maxIterations)},"densityFactor":${limits.densityFactor},"maxNetworks":${cap(limits.maxNetworks)}}"""
-        }
+        // Every JSON body is built with spray-json (ApiJson, #123): user-provided strings (names,
+        // uids, path segments) are escaped; shapes and number types are unchanged.
+        def jsonEntity(value: JsValue): HttpEntity.Strict =
+            HttpEntity(ContentTypes.`application/json`, value.compactPrint)
 
         val userRoutes: Route = addCorsHeaders {
             pathPrefix("api" / "users") {
@@ -342,18 +333,8 @@ object Server {
                         authenticate { authUser =>
                             val limits = DatabaseManager.getUsageLimits(authUser.roles)
                             // email/name/photo come from the token (the name is user-editable in
-                            // Firebase Auth): JSON-escape them.
-                            val responseJson = s"""{
-                              |  "uid": "${authUser.uid}",
-                              |  "email": ${JsString(authUser.email).compactPrint},
-                              |  "name": ${JsString(authUser.name).compactPrint},
-                              |  "photo": ${authUser.photo.map(p => JsString(p).compactPrint).getOrElse("null")},
-                              |  "roles": [${authUser.roles.map(r => s""""$r"""").mkString(",")}],
-                              |  "usageLimits": ${usageLimitsJson(limits)},
-                              |  "deactivated": false
-                              |}""".stripMargin
-                            complete(StatusCodes.OK ->
-                                HttpEntity(ContentTypes.`application/json`, responseJson))
+                            // Firebase Auth).
+                            complete(StatusCodes.OK -> jsonEntity(ApiJson.userSync(authUser, limits)))
                         }
                     }
                 } ~
@@ -364,10 +345,8 @@ object Server {
                             if (authUser.uid == targetUid || authUser.isAdmin) {
                                 DatabaseManager.getUserByFirebaseUid(targetUid) match {
                                     case Some(user) =>
-                                        val rolesJson = user.roles.map(r => s""""$r"""").mkString(",")
-                                        val limitsJson = usageLimitsJson(DatabaseManager.getUsageLimits(user.roles))
-                                        complete(StatusCodes.OK -> HttpEntity(ContentTypes.`application/json`,
-                                            s"""{"uid":"${user.firebaseUid}","email":${JsString(user.email).compactPrint},"name":${JsString(user.name).compactPrint},"roles":[$rolesJson],"usageLimits":$limitsJson,"deactivated":${user.deactivated}}"""))
+                                        complete(StatusCodes.OK -> jsonEntity(
+                                            ApiJson.userInfo(user, DatabaseManager.getUsageLimits(user.roles))))
                                     case None =>
                                         complete(StatusCodes.NotFound ->
                                             errorJson("not_found", "User not found"))
@@ -387,8 +366,7 @@ object Server {
                         authenticate { authUser =>
                             if (DatabaseManager.deactivateUser(authUser.dbUserId)) {
                                 Logger.log(s"User deactivated: ${authUser.uid}")
-                                complete(StatusCodes.OK -> HttpEntity(ContentTypes.`application/json`,
-                                    """{"deactivated":true}"""))
+                                complete(StatusCodes.OK -> jsonEntity(ApiJson.deactivated))
                             } else {
                                 complete(StatusCodes.InternalServerError ->
                                     errorJson("internal_error", "Failed to deactivate account"))
@@ -405,8 +383,7 @@ object Server {
                                 complete(StatusCodes.BadRequest ->
                                     errorJson("invalid_body", s"Invalid role: $newRole"))
                             } else if (DatabaseManager.addUserRole(targetUid, newRole)) {
-                                complete(StatusCodes.OK -> HttpEntity(ContentTypes.`application/json`,
-                                    s"""{"uid":"$targetUid","role":"$newRole","action":"added"}"""))
+                                complete(StatusCodes.OK -> jsonEntity(ApiJson.roleAction(targetUid, newRole, "added")))
                             } else {
                                 complete(StatusCodes.InternalServerError ->
                                     errorJson("internal_error", "Failed to update role"))
@@ -439,6 +416,7 @@ object Server {
         actorSystem.scheduler.scheduleWithFixedDelay(60.seconds, 60.seconds)(() => {
             SimulationCache.cleanup()
             WsRegistry.cleanup()
+            TokenVerifier.purgeExpired()
         })(actorSystem.dispatcher)
 
         // Ephemeral frame cleanup runs less often (storage cost, not correctness). Grace window and
@@ -451,10 +429,8 @@ object Server {
         import SimulationJsonProtocol.*
 
         // effectiveDensity is only sent for generated runs (#83, #122).
-        def simCreatedJson(runId: Long, networkCount: Int, effectiveDensity: Option[Int] = None): String = {
-            val densityField = effectiveDensity.map(d => s""""effectiveDensity":$d,""").getOrElse("")
-            s"""{"runId":"$runId","status":"running","networkCount":$networkCount,$densityField"wsUrl":"/ws"}"""
-        }
+        def simCreatedJson(runId: Long, networkCount: Int, effectiveDensity: Option[Int] = None): JsValue =
+            ApiJson.simCreated(runId, networkCount, effectiveDensity)
 
         def invalidBody(message: String): HttpResponse =
             HttpResponse(StatusCodes.BadRequest, entity = errorJson("invalid_body", message))
@@ -476,21 +452,20 @@ object Server {
             else None
         }
 
-        def runSummaryJson(r: DatabaseManager.RunSummary): String =
-            s"""{
-               |  "id": "${r.id}",
-               |  "type": "${r.runType}",
-               |  "name": ${r.name.map(n => s""""$n"""").getOrElse("null")},
-               |  "networkCount": ${r.networkCount},
-               |  "iterationLimit": ${r.iterationLimit},
-               |  "stopThreshold": ${r.stopThreshold},
-               |  "createdAt": "${r.createdAt}",
-               |  "status": "${r.status}"
-               |}""".stripMargin
-
-        def jsonOk(body: String): HttpResponse =
+        // A body already printed by ApiJson (the streamed /topology and /results pages).
+        def jsonOkBody(body: String): HttpResponse =
             HttpResponse(StatusCodes.OK,
                 entity = HttpEntity(ContentTypes.`application/json`, body))
+
+        def jsonOk(value: JsValue): HttpResponse = jsonOkBody(value.compactPrint)
+
+        // Negative pagination parameters of /topology and /results (they used to index the snapshot
+        // arrays out of bounds → 500): 400 invalid_body naming each offending parameter (#123).
+        def negativePageParams(params: (String, Int)*): Option[HttpResponse] = {
+            val issues = params.collect { case (name, value) if value < 0 => FieldIssue(name, s"must be >= 0 (got $value)") }
+            Option.when(issues.nonEmpty)(HttpResponse(StatusCodes.BadRequest,
+                entity = errorJson("invalid_body", "Pagination parameters must not be negative", issues)))
+        }
 
         // Resolves frameRetention: only Administrators can request "persistent".
         // Returns Right(retention) on success, Left(errorResponse) on rejection.
@@ -629,8 +604,7 @@ object Server {
                         authenticate { authUser =>
                             parameters("limit".as[Int].withDefault(20), "offset".as[Int].withDefault(0)) { (limit, offset) =>
                                 val runs = DatabaseManager.getRunsForUser(authUser.dbUserId, limit, offset)
-                                val items = runs.map(runSummaryJson).mkString(",")
-                                complete(jsonOk(s"""{"runs":[$items],"limit":$limit,"offset":$offset}"""))
+                                complete(jsonOk(ApiJson.runList(runs, limit, offset)))
                             }
                         }
                     }
@@ -641,8 +615,7 @@ object Server {
                         requireAdmin { _ =>
                             parameters("limit".as[Int].withDefault(20), "offset".as[Int].withDefault(0)) { (limit, offset) =>
                                 val runs = DatabaseManager.getAllRuns(limit, offset)
-                                val items = runs.map(runSummaryJson).mkString(",")
-                                complete(jsonOk(s"""{"runs":[$items],"limit":$limit,"offset":$offset}"""))
+                                complete(jsonOk(ApiJson.runList(runs, limit, offset)))
                             }
                         }
                     }
@@ -658,7 +631,7 @@ object Server {
                                         errorJson("not_found", "Run not found"))
                                     case Some(run) =>
                                         if (run.userId.contains(authUser.dbUserId) || authUser.isAdmin)
-                                            complete(jsonOk(runSummaryJson(run)))
+                                            complete(jsonOk(ApiJson.runSummary(run)))
                                         else
                                             complete(StatusCodes.Forbidden ->
                                                 errorJson("forbidden", "Access denied"))
@@ -685,7 +658,7 @@ object Server {
                                         // the update itself failed — then it is still running).
                                         if (DatabaseManager.setRunStatus(runId, "cancelled")) {
                                             monitor ! CancelRun(runId)
-                                            complete(jsonOk(s"""{"runId":"$runId","cancelled":true}"""))
+                                            complete(jsonOk(ApiJson.runCancelled(runId)))
                                         } else if (DatabaseManager.getRunSummary(runId).exists(_.status == "running")) {
                                             complete(StatusCodes.InternalServerError ->
                                                 errorJson("internal_error", "Failed to cancel the run"))
@@ -713,8 +686,7 @@ object Server {
                                         // persisted frames (#124).
                                         val cached = SimulationCache.getNetworkIds(runId)
                                         val ids = if (cached.nonEmpty) cached else DatabaseManager.getFrameNetworkIds(runId)
-                                        val items = ids.map(id => s""""$id"""").mkString(",")
-                                        complete(jsonOk(s"""{"runId":"$runId","networks":[$items]}"""))
+                                        complete(jsonOk(ApiJson.networkList(runId, ids)))
                                 }
                             }
                         }
@@ -738,11 +710,16 @@ object Server {
                                                 "edgeOffset".as[Int].withDefault(0),
                                                 "edgeLimit".as[Int].withDefault(1000)
                                             ) { (aOff, aLim, eOff, eLim) =>
-                                                SimulationCache.getTopology(runId, networkId) match {
-                                                    case None => complete(StatusCodes.Accepted ->
-                                                        errorJson("not_ready", "Topology not yet available"))
-                                                    case Some(snap) =>
-                                                        complete(jsonOk(topologyPageJson(snap, runId, networkId, aOff, aLim, eOff, eLim)))
+                                                negativePageParams("agentOffset" -> aOff, "agentLimit" -> aLim,
+                                                                   "edgeOffset" -> eOff, "edgeLimit" -> eLim) match {
+                                                    case Some(resp) => complete(resp)
+                                                    case None =>
+                                                        SimulationCache.getTopology(runId, networkId) match {
+                                                            case None => complete(StatusCodes.Accepted ->
+                                                                errorJson("not_ready", "Topology not yet available"))
+                                                            case Some(snap) =>
+                                                                complete(jsonOkBody(ApiJson.topologyPage(snap, runId, networkId, aOff, aLim, eOff, eLim)))
+                                                        }
                                                 }
                                             }
                                         }
@@ -753,11 +730,15 @@ object Server {
                                                 "offset".as[Int].withDefault(0),
                                                 "limit".as[Int].withDefault(500)
                                             ) { (off, lim) =>
-                                                SimulationCache.getResults(runId, networkId) match {
-                                                    case None => complete(StatusCodes.Accepted ->
-                                                        errorJson("not_ready", "Results not yet available — run may still be in progress"))
-                                                    case Some(snap) =>
-                                                        complete(jsonOk(resultsPageJson(snap, runId, networkId, off, lim)))
+                                                negativePageParams("offset" -> off, "limit" -> lim) match {
+                                                    case Some(resp) => complete(resp)
+                                                    case None =>
+                                                        SimulationCache.getResults(runId, networkId) match {
+                                                            case None => complete(StatusCodes.Accepted ->
+                                                                errorJson("not_ready", "Results not yet available — run may still be in progress"))
+                                                            case Some(snap) =>
+                                                                complete(jsonOkBody(ApiJson.resultsPage(snap, runId, networkId, off, lim)))
+                                                        }
                                                 }
                                             }
                                         }
@@ -903,7 +884,15 @@ object Server {
         // Dual-mount: el reverse proxy del LIPN expone el backend bajo /api y
         // no controlamos si strippea el prefijo — aceptamos ambas formas
         // (/ws y /api/ws, /simulations y /api/simulations, etc.).
-        val routes: Route = baseRoutes ~ pathPrefix("api")(baseRoutes)
+        // Global JSON error handlers around BOTH mounts (#123): rejections and uncaught exceptions
+        // answer {error, message[, fields]} with CORS (see ErrorHandling), and so does the
+        // request-timeout answer.
+        val routes: Route =
+            withRequestTimeoutResponse(_ => ErrorHandling.requestTimeoutResponse) {
+                ErrorHandling.handleErrors {
+                    baseRoutes ~ pathPrefix("api")(baseRoutes)
+                }
+            }
         val bindingFuture = Http().newServerAt(serverHost, serverPort).bind(routes)
         
         bindingFuture.onComplete {
@@ -1033,63 +1022,12 @@ object Server {
      * WS control event of a run that ended in status `error` (#124). Same `event: "error"` shape the
      * frontend handles; `runId` routes it to the run's subscription.
      */
-    def runErrorEventJson(runId: Long, message: String): String =
-        JsObject(
-            "event"   -> JsString("error"),
-            "runId"   -> JsString(runId.toString),
-            "code"    -> JsString("run_failed"),
-            "message" -> JsString(message)
-        ).compactPrint
+    def runErrorEventJson(runId: Long, message: String): String = WsEvents.runError(runId, message)
 
     /** Starts the post-run retention of every in-memory store of a run (#124). */
     def markRunTerminal(runId: Long): Unit = {
         WsRegistry.markTerminal(runId)
         SimulationCache.markTerminal(runId)
-    }
-
-    private def topologyPageJson(snap: TopologySnapshot, runId: Long, networkId: String,
-        aOff: Int, aLim: Int, eOff: Int, eLim: Int): String = {
-        val aEnd = math.min(aOff + aLim, snap.agentCount)
-        val agents = (math.min(aOff, snap.agentCount) until aEnd).map { i =>
-            val name = if (snap.names != null) s""""${snap.names(i)}"""" else "null"
-            s"""{"index":$i,"name":$name,"initialBelief":${snap.initialBeliefs(i)},"toleranceRadius":${snap.tolRadius(i)},"toleranceOffset":${snap.tolOffset(i)},"silenceStrategy":${snap.silenceStrategies(i) & 0xFF},"silenceEffect":${snap.silenceEffects(i) & 0xFF}}"""
-        }.mkString(",")
-        val eStart = math.min(eOff, snap.edgeCount)
-        val eEnd   = math.min(eOff + eLim, snap.edgeCount)
-        val edges  = edgesPageJson(snap, eStart, eEnd)
-        s"""{"runId":"$runId","networkId":"$networkId","agentCount":${snap.agentCount},"edgeCount":${snap.edgeCount},"agentOffset":$aOff,"agentLimit":$aLim,"edgeOffset":$eOff,"edgeLimit":$eLim,"agents":[$agents],"edges":[$edges]}"""
-    }
-
-    /**
-     * Edges `[eStart, eEnd)` of the snapshot's CSR, in CSR order. Row `owner` lists the agents that
-     * `owner` listens to (`neighborsRefs(j)`, with the weight `owner` gives it), for custom AND
-     * generated networks, so each entry is reported as `source` = `neighborsRefs(j)` (the influencer)
-     * and `target` = `owner` (the agent whose belief is updated): "source influences target", the
-     * same meaning as the custom-run request edges.
-     */
-    private def edgesPageJson(snap: TopologySnapshot, eStart: Int, eEnd: Int): String = {
-        if (eStart >= eEnd || snap.edgeCount == 0) return ""
-        val sb  = new StringBuilder
-        var owner = 0
-        while (owner < snap.agentCount - 1 && snap.indexOffset(owner) <= eStart) owner += 1
-        var first = true
-        for (j <- eStart until eEnd) {
-            while (owner < snap.agentCount - 1 && snap.indexOffset(owner) <= j) owner += 1
-            if (!first) sb.append(',')
-            first = false
-            sb.append(s"""{"source":${snap.neighborsRefs(j)},"target":$owner,"influence":${snap.neighborsWeights(j)},"bias":${snap.neighborBiases(j) & 0xFF}}""")
-        }
-        sb.toString
-    }
-
-    private def resultsPageJson(snap: ResultsSnapshot, runId: Long, networkId: String, off: Int, lim: Int): String = {
-        val start = math.min(off, snap.agentCount)
-        val end   = math.min(off + lim, snap.agentCount)
-        val agents = (start until end).map { i =>
-            val name = if (snap.names != null) s""""${snap.names(i)}"""" else "null"
-            s"""{"index":$i,"name":$name,"finalBelief":${snap.finalBeliefs(i)},"publicBelief":${snap.publicBeliefs(i)}}"""
-        }.mkString(",")
-        s"""{"runId":"$runId","networkId":"$networkId","finalRound":${snap.finalRound},"consensus":${snap.consensus},"agentCount":${snap.agentCount},"offset":$off,"limit":$lim,"agents":[$agents]}"""
     }
 
     /**

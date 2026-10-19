@@ -6,10 +6,9 @@ import akka.pattern.pipe
 import akka.stream.Materializer
 import akka.stream.scaladsl.Sink
 import akka.util.ByteString
-import com.google.firebase.auth.FirebaseAuth
 import io.db.DatabaseManager
-import io.web.{MemoryBudget, Server, SimulationCache}
-import io.web.auth.AuthenticatedUser
+import io.web.{MemoryBudget, SimulationCache}
+import io.web.auth.{AuthenticatedUser, TokenFailure, TokenRejection, TokenVerifier}
 import spray.json.*
 import DefaultJsonProtocol.*
 import utils.logging.Logger
@@ -20,7 +19,12 @@ import scala.concurrent.{ExecutionContext, Future}
 import scala.util.control.NonFatal
 import scala.util.{Failure, Success, Try}
 
-private case class AuthResult(user: Option[AuthenticatedUser])
+/**
+ * Outcome of one `auth` message. `failureReason` (only with `user = None`) is the `reason` of the
+ * `auth_failed` event: `token_revoked` / `account_deactivated` for a valid token that is refused,
+ * None for an invalid or expired token (or an unexpected failure).
+ */
+private case class AuthResult(user: Option[AuthenticatedUser], failureReason: Option[String] = None)
 case object ConnectionClosed
 
 object WsConnectionActor {
@@ -28,6 +32,14 @@ object WsConnectionActor {
     case object OutboundAck
     /** Fails the outbound source: the socket is closed with 1011 and the client reconnects. */
     final case class FailOutbound(reason: String)
+    /**
+     * Completes the outbound source once its last element was acknowledged: Akka HTTP then closes
+     * the socket with a normal closure (1000). Sent after `auth_failed` (#123). Akka HTTP 10.5 has
+     * no public API to choose the close code of a server-side WebSocket (only 1000 on completion,
+     * 1011 on failure), so the policy-violation code 1008 cannot be sent; the frontend treats 1000
+     * and 1008 alike (no reconnect, `auth_failed`).
+     */
+    case object CompleteOutbound
 
     // ── Client → server messages (#119) ──────────────────────────────────────
 
@@ -85,8 +97,7 @@ object WsConnectionActor {
     }
 
     /** The `invalid_message` error event: same shape as `auth_failed` / `run_not_found`, plus `message`. */
-    def invalidMessageJson(reason: String): String =
-        s"""{"type":"error","code":"invalid_message","message":${JsString(reason).compactPrint}}"""
+    def invalidMessageJson(reason: String): String = WsEvents.invalidMessage(reason)
 
     /**
      * Reads one inbound WS message as what the connection actor receives (#119): the same
@@ -161,8 +172,8 @@ object WsConnectionActor {
 
     private def terminalEventJson(runId: Long, status: String): String =
         // A run that failed ends with the same `error` event live subscribers got (#124).
-        if (status == "error") Server.runErrorEventJson(runId, "The simulation ended with an error")
-        else s"""{"event":"run_completed","runId":"$runId"}"""
+        if (status == "error") WsEvents.runError(runId, "The simulation ended with an error")
+        else WsEvents.runCompleted(runId)
 
     private def nextPageRows(maxRowBytes: Int): Int =
         math.max(1L, math.min(MaxReplayPageRows.toLong, ReplayPageTargetBytes / math.max(1, maxRowBytes))).toInt
@@ -190,8 +201,8 @@ object WsConnectionActor {
                 val networkId = ids(j.netIdx)
                 j.stage match {
                     case ReplayStage.NetworkStart =>
-                        out += TextMessage(s"""{"event":"topology_ready","runId":"${j.runId}","networkId":"$networkId"}""")
-                        out += TextMessage(s"""{"event":"network_started","runId":"${j.runId}","networkId":"$networkId"}""")
+                        out += TextMessage(WsEvents.topologyReady(j.runId, networkId))
+                        out += TextMessage(WsEvents.networkStarted(j.runId, networkId))
                         val stage = if (Try(UUID.fromString(networkId)).isSuccess) ReplayStage.NetworkFrames else ReplayStage.NetworkEnd
                         j = j.copy(stage = stage, afterRound = -1, afterStartsAt = -1)
                     case ReplayStage.NetworkFrames =>
@@ -210,8 +221,7 @@ object WsConnectionActor {
                         }
                     case ReplayStage.NetworkEnd =>
                         SimulationCache.getResults(j.runId, networkId).foreach { r =>
-                            out += TextMessage(
-                                s"""{"event":"network_converged","runId":"${j.runId}","networkId":"$networkId","finalRound":${r.finalRound},"consensus":${r.consensus}}""")
+                            out += TextMessage(WsEvents.networkConverged(j.runId, networkId, r.finalRound, r.consensus))
                         }
                         j = j.copy(netIdx = j.netIdx + 1, stage = ReplayStage.NetworkStart)
                 }
@@ -269,16 +279,17 @@ class WsConnectionActor(outRef: ActorRef)(implicit mat: Materializer) extends Ac
         case tm: TextMessage.Strict            => doAuth(tm.text)
         case UnreadableClientMessage(reason)   => sendControl(invalidMessageJson(reason))
         case m: Message                        => readClientMessage(m).pipeTo(self)
-        case AuthResult(Some(u))      =>
+        case AuthResult(Some(u), _)   =>
             user = Some(u)
             context.become(authenticated)
-            sendControl(s"""{"type":"auth_ok","userId":"${u.uid}"}""")
-        case AuthResult(None)         =>
-            // Stop once the error has been handed to the socket (it may be queued behind an
-            // earlier reply); input is ignored meanwhile, as when the actor stopped at once.
+            sendControl(WsEvents.authOk(u.uid))
+        case AuthResult(None, reason) =>
+            // Close once the error has been handed to the socket (it may be queued behind an
+            // earlier reply): the outbound source is completed (normal closure, see
+            // CompleteOutbound) and the actor stops; input is ignored meanwhile.
             context.become(closing)
             stopWhenDrained = true
-            sendControl("""{"type":"error","code":"auth_failed"}""")
+            sendControl(WsEvents.authFailed(reason))
         case ConnectionClosed         => context.stop(self)
     }
 
@@ -336,8 +347,10 @@ class WsConnectionActor(outRef: ActorRef)(implicit mat: Materializer) extends Ac
             awaitingAck = true
             outRef ! msg
         }
-        if (stopWhenDrained && !awaitingAck && outbox.isEmpty) context.stop(self)
-        else maybeFetchReplay()
+        if (stopWhenDrained && !awaitingAck && outbox.isEmpty) {
+            outRef ! CompleteOutbound
+            context.stop(self)
+        } else maybeFetchReplay()
     }
 
     private def failConnection(reason: String): Unit = {
@@ -382,24 +395,31 @@ class WsConnectionActor(outRef: ActorRef)(implicit mat: Materializer) extends Ac
                 catch {
                     case NonFatal(ex) =>
                         Logger.logError(s"WS connection of $who: handling a client message failed: ${ex.getMessage}")
-                        sendControl("""{"type":"error","code":"internal_error"}""")
+                        sendControl(WsEvents.internalError)
                 }
         }
 
     private def doAuth(text: String): Unit = onClientText(text) {
         case ClientMessage.Auth(token) =>
             Future {
-                Try(FirebaseAuth.getInstance().verifyIdToken(token)) match {
-                    case Success(decoded) =>
-                        val uid   = decoded.getUid
-                        val email = Option(decoded.getEmail).getOrElse("")
-                        val name  = Option(decoded.getName).getOrElse("")
-                        val photo = Option(decoded.getPicture)
-                        val maybeUser = DatabaseManager.createOrUpdateUser(uid, email, name, photo)
-                            .map(u => AuthenticatedUser(uid, email, name, photo, u.roles, u.id))
-                        AuthResult(maybeUser)
-                    case Failure(ex) =>
-                        Logger.log(s"WS auth token verification failed: ${ex.getMessage}")
+                // Same verification as REST (#123): signature first, then the fail-open revocation check.
+                TokenVerifier.verify(token) match {
+                    case Right(t) =>
+                        DatabaseManager.createOrUpdateUser(t.uid, t.email, t.name, t.photo) match {
+                            case Some(u) if u.deactivated =>
+                                // REST answers 401 "Account is deactivated" to such an account.
+                                Logger.log(s"WS auth refused: account ${t.uid} is deactivated")
+                                AuthResult(None, Some("account_deactivated"))
+                            case Some(u) =>
+                                AuthResult(Some(AuthenticatedUser(t.uid, t.email, t.name, t.photo, u.roles, u.id)))
+                            case None =>
+                                AuthResult(None)
+                        }
+                    case Left(TokenFailure(TokenRejection.Revoked, detail)) =>
+                        Logger.log(s"WS auth token rejected (revoked session or disabled account): $detail")
+                        AuthResult(None, Some("token_revoked"))
+                    case Left(TokenFailure(TokenRejection.Invalid, detail)) =>
+                        Logger.log(s"WS auth token verification failed: $detail")
                         AuthResult(None)
                 }
             }.recover { case NonFatal(ex) =>
@@ -409,7 +429,7 @@ class WsConnectionActor(outRef: ActorRef)(implicit mat: Materializer) extends Ac
             }.pipeTo(self)
         case _ =>
             // A well-formed subscribe / unsubscribe before auth.
-            sendControl("""{"type":"error","code":"auth_required"}""")
+            sendControl(WsEvents.authRequired)
     }
 
     private def handleControl(text: String): Unit = onClientText(text) {
@@ -443,7 +463,7 @@ class WsConnectionActor(outRef: ActorRef)(implicit mat: Materializer) extends Ac
         // buffer has been evicted. Decide based on DB state.
         DatabaseManager.getRunSummary(runId) match {
             case None =>
-                sendControl(s"""{"type":"error","code":"run_not_found","runId":"$runId"}""")
+                sendControl(WsEvents.runNotFound(runId))
                 WsRegistry.unsubscribe(runId, self)
                 subscribedRuns -= runId
 
