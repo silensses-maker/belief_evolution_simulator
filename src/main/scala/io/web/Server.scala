@@ -1029,6 +1029,15 @@ object Server {
         frameRetention: String = "ephemeral"
     ): Long = {
         var runID = SnowflakeID.generateId()
+        // Save mode forced to DEBUG BY DESIGN in this phase (#133): while APP_LEGACY_DB=false any
+        // requested saveMode becomes DEBUG, so no per-agent data is written. Only the run row
+        // (configuration and distributions, owner, status) and, with persistFrames, the replay
+        // frames are stored (ephemeral frames: deleted 60–90 min after the run ends, see
+        // EphemeralFramesGraceMinutes). The frontend no longer offers a save-mode choice and always
+        // sends 1 (STANDARD). To revisit (e.g. once the platform has real users): this condition,
+        // here AND in startCustomRun, is the switch; per-agent saving currently relies on the
+        // legacy-DB path (Network.agentsIds exists only with APP_LEGACY_DB=true), so it has to be
+        // ported to the current schema first, and the wizard's selector brought back.
         val convertedSaveMode = if (GlobalState.APP_MODE.skipDatabase || !GlobalState.APP_MODE.usesLegacyDB)
             SaveModes.DEBUG
         else
@@ -1462,6 +1471,12 @@ object Server {
         frameRetention: String = "ephemeral"
     ): Either[HttpResponse, Long] = {
         var runID = SnowflakeID.generateId()
+        // Save mode forced to DEBUG BY DESIGN in this phase (#133), same decision as in
+        // executeGeneratedRun: while APP_LEGACY_DB=false the requested saveMode (JSON body, or
+        // byte 8 of the binary payload) is ignored and no per-agent data is written; only the
+        // run's configuration (`custom_runs` with its agents and edges) and, with persistFrames,
+        // the replay frames are stored. To revisit, change this condition here AND in
+        // executeGeneratedRun (see the notes there).
         val convertedSaveMode = if (GlobalState.APP_MODE.skipDatabase || !GlobalState.APP_MODE.usesLegacyDB)
                                     SaveModes.DEBUG
                                 else SaveModes.codeToSaveMode(run.saveMode)

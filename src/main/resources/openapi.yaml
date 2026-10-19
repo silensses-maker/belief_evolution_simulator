@@ -12,7 +12,11 @@ info:
     endpoint, `/api/users/sync` and `/api/users/info/{uid}` included. Reactivation has no
     endpoint: an administrator sets `users.deactivated = false` in the database.
 
-    **Save modes:** `0` = FULL (persists to DB), `1` = PARTIAL, `2` = DEBUG (no DB writes — use in dev).
+    **Save modes:** `0` = FULL, `1` = STANDARD, `2` = STANDARD_LIGHT (`SaveModes.codeToSaveMode`;
+    DEBUG — no per-agent DB writes — is internal code `7`).
+    In this phase `saveMode` is required but ignored, by design (#133): while `APP_LEGACY_DB=false`
+    the server runs every simulation in DEBUG mode, so no per-agent data is written — only the run
+    row and, with `persistFrames=true`, the frames (see *Retention of run data* below).
 
     **Silence strategies:** `0` = DEGROOT, `1` = MAJORITY, `2` = THRESHOLD, `3` = CONFIDENCE
 
@@ -160,11 +164,11 @@ components:
             Convergence is per-network and surfaces via the `network_converged` WS event;
             at the run level a converged run is just `completed`.
 
-            **Limitation:** `status` is persisted only when the run row is written to DB.
-            Runs created with `saveMode=DEBUG` (no DB writes) will return `404 Not Found`
-            on reconnect — the frontend should treat 404 as "run no longer trackable" rather
-            than "never existed". For DEBUG runs, status must be inferred from live WS
-            events while the connection is open.
+            **Note:** while `APP_LEGACY_DB=false` the run row (with its `status`) is always
+            written, even though every run executes in DEBUG save mode, so `GET /simulations/{runId}`
+            keeps answering after reconnects. Only with `APP_SKIP_DATABASE=true` is no row written;
+            then `404 Not Found` means "run no longer trackable" and status must be inferred from
+            live WS events.
 
     SimCreated:
       type: object
@@ -257,6 +261,7 @@ components:
           description: RNG seed. null or omit for random.
         saveMode:
           type: integer
+          description: Required but currently ignored — every run is saved in DEBUG mode (#133).
         agentTypes:
           type: array
           minItems: 1
@@ -356,6 +361,7 @@ components:
           format: float
         saveMode:
           type: integer
+          description: Required but currently ignored — every run is saved in DEBUG mode (#133).
         agents:
           type: array
           minItems: 1
