@@ -83,6 +83,21 @@ object SimulationJsonProtocol {
 }
 
 // Data containers:
+/**
+ * A custom network as the simulator consumes it (Network.BuildCustomNetwork copies these arrays).
+ * The last four fields are its CSR adjacency, in the simulator's layout, NOT the user's edge list:
+ * the row of agent `i` is `[indexOffset(i - 1), indexOffset(i))` (from 0 for `i = 0`) and lists the
+ * agents `i` LISTENS TO — `i` updates its belief from each of them with the row's weight and bias.
+ * A user edge `source -> target` ("source influences target") therefore lives in the row of its
+ * TARGET, and its SOURCE is the neighbor reference stored in `target` (the field keeps its
+ * historical name because core reads it as `neighborsRefs`). See Server.startCustomRun.
+ *
+ * @param indexOffset CSR row END pointers, one per agent (Server.buildEndOffsets)
+ * @param target      CSR neighbor references: for each row, the agents that influence its owner
+ *                    (the user edges' SOURCES), grouped by listening agent
+ * @param influences  weight the row owner gives to each neighbor's opinion (same order)
+ * @param bias        cognitive bias the row owner applies to each neighbor's opinion (same order)
+ */
 case class CustomRunInfo(
     runID: Long,
     stopThreshold: Float,
@@ -975,17 +990,24 @@ object Server {
         s"""{"runId":"$runId","networkId":"$networkId","agentCount":${snap.agentCount},"edgeCount":${snap.edgeCount},"agentOffset":$aOff,"agentLimit":$aLim,"edgeOffset":$eOff,"edgeLimit":$eLim,"agents":[$agents],"edges":[$edges]}"""
     }
 
+    /**
+     * Edges `[eStart, eEnd)` of the snapshot's CSR, in CSR order. Row `owner` lists the agents that
+     * `owner` listens to (`neighborsRefs(j)`, with the weight `owner` gives it), for custom AND
+     * generated networks, so each entry is reported as `source` = `neighborsRefs(j)` (the influencer)
+     * and `target` = `owner` (the agent whose belief is updated): "source influences target", the
+     * same meaning as the custom-run request edges.
+     */
     private def edgesPageJson(snap: TopologySnapshot, eStart: Int, eEnd: Int): String = {
         if (eStart >= eEnd || snap.edgeCount == 0) return ""
         val sb  = new StringBuilder
-        var src = 0
-        while (src < snap.agentCount - 1 && snap.indexOffset(src) <= eStart) src += 1
+        var owner = 0
+        while (owner < snap.agentCount - 1 && snap.indexOffset(owner) <= eStart) owner += 1
         var first = true
         for (j <- eStart until eEnd) {
-            while (src < snap.agentCount - 1 && snap.indexOffset(src) <= j) src += 1
+            while (owner < snap.agentCount - 1 && snap.indexOffset(owner) <= j) owner += 1
             if (!first) sb.append(',')
             first = false
-            sb.append(s"""{"source":$src,"target":${snap.neighborsRefs(j)},"influence":${snap.neighborsWeights(j)},"bias":${snap.neighborBiases(j) & 0xFF}}""")
+            sb.append(s"""{"source":${snap.neighborsRefs(j)},"target":$owner,"influence":${snap.neighborsWeights(j)},"bias":${snap.neighborBiases(j) & 0xFF}}""")
         }
         sb.toString
     }
@@ -1246,7 +1268,14 @@ object Server {
         }).orElse(duplicateEdge(req.edges.iterator.map(e => (e.source, e.target))))
     }
 
-    /** A custom run ready to persist and start — produced by both the binary and the JSON variants. */
+    /**
+     * A custom run ready to persist and start — produced by both the binary and the JSON variants.
+     * `sortedSource` / `sortedTarget` / `sortedInfluences` / `sortedBiases` are the user's edges with
+     * the user's meaning (`sortedSource(k)` influences `sortedTarget(k)`), reordered by TARGET (the
+     * listening agent; stable, so a listener's edges keep their input order). That is the simulator's
+     * CSR order, so `indexOffset` = buildEndOffsets(sortedTarget) and `sortedSource` is the neighbor
+     * reference array (see CustomRunInfo).
+     */
     private final case class DecodedCustomRun(
         networkName: String,
         stopThreshold: Float,
@@ -1266,6 +1295,27 @@ object Server {
         sortedInfluences: Array[Float],
         sortedBiases: Array[Bias]
     )
+
+    /**
+     * CSR row pointers of a custom network, shared by the binary and the JSON variants (#131).
+     * The simulator reads `indexOffset` by AGENT index: agent `i` uses the edges
+     * `[indexOffset(i - 1), indexOffset(i))` (from 0 for agent 0) of the edge arrays sorted by
+     * listening agent — the edge TARGET, since an edge `source -> target` means the target updates
+     * its belief from the source — so `indexOffset(i)` is the END of agent `i`'s range
+     * (AgentProcessor; same convention as the generated networks built in Network). Counting the
+     * edges of each target agent and accumulating gives every agent its own entry: an agent that is
+     * the target of no edge (nobody influences it) gets an empty range
+     * (`indexOffset(i) == indexOffset(i - 1)`). Writing one entry per DISTINCT row agent instead
+     * shifted the range of every later agent onto the wrong agent. When every agent has at least one
+     * edge both constructions give the same array.
+     * `sortedTargets` must be sorted ascending, with every value in `[0, numberOfAgents)`.
+     */
+    private def buildEndOffsets(sortedTargets: Array[Int], numberOfAgents: Int): Array[Int] = {
+        val indexOffset = new Array[Int](numberOfAgents)
+        for (target <- sortedTargets) indexOffset(target) += 1
+        for (i <- 1 until numberOfAgents) indexOffset(i) += indexOffset(i - 1)
+        indexOffset
+    }
 
     /**
      * Legacy POST /custom and GET /neighbors: run id as plain text, 400 JSON when malformed, 500 JSON
@@ -1417,23 +1467,17 @@ object Server {
             offset += 12
         }
         
-        // Preparing data
-        val sortedIndices = source.indices.sortBy(source(_))
-        
+        // Preparing data: an edge `source -> target` means the target listens to the source, so the
+        // simulator's CSR is grouped by TARGET and its neighbor references are the sources
+        // (see DecodedCustomRun / CustomRunInfo).
+        val sortedIndices = target.indices.sortBy(target(_))
+
         val sortedInfluences = sortedIndices.map(influences(_)).toArray
         val sortedBiases = sortedIndices.map(biases(_)).toArray
         val sortedSource = sortedIndices.map(source(_)).toArray
         val sortedTarget = sortedIndices.map(target(_)).toArray
-        
-        val indexOffset = new Array[Int](numberOfAgents)
-        var count = 0
-        for (i <- 0 until numberOfNeighbors) {
-            if ((i != 0) && sortedSource(i - 1) != sortedSource(i)) {
-                indexOffset(count) = i
-                count += 1
-            }
-        }
-        indexOffset(indexOffset.length - 1) = numberOfNeighbors
+
+        val indexOffset = buildEndOffsets(sortedTarget, numberOfAgents)
 
         DecodedCustomRun(
             networkName       = networkName,
@@ -1504,6 +1548,7 @@ object Server {
                     run.majorityThreshold,
                     run.confidences
                 ),
+                // The user's edges as sent (source influences target); only the row order differs.
                 customNeighborsData = CustomNeighborsData(
                     run.sortedSource, run.sortedTarget, run.sortedInfluences, run.sortedBiases),
                 userId = userId,
@@ -1532,7 +1577,9 @@ object Server {
             agentSilenceEffect   = run.silenceEffects,
             agentNames           = run.agentNames,
             indexOffset          = run.indexOffset,
-            target               = run.sortedTarget,
+            // CSR neighbor references = the agents each listener updates from = the edge SOURCES
+            // (the field is named `target` for historical reasons; see CustomRunInfo).
+            target               = run.sortedSource,
             influences           = run.sortedInfluences,
             bias                 = run.sortedBiases,
             persistFrames        = persistFrames
@@ -1562,23 +1609,15 @@ object Server {
         val infArr  = req.edges.map(_.influence).toArray
         val biasArr = req.edges.map(e => CognitiveBiases.fromByte(e.bias.toByte)).toArray
 
-        val sortedIdx    = srcArr.indices.sortBy(srcArr(_))
+        // Same layout as the binary variant: grouped by TARGET (the listening agent), the sources
+        // are the neighbor references (see DecodedCustomRun / CustomRunInfo).
+        val sortedIdx    = tgtArr.indices.sortBy(tgtArr(_))
         val sortedSrc    = sortedIdx.map(srcArr(_)).toArray
         val sortedTgt    = sortedIdx.map(tgtArr(_)).toArray
         val sortedInf    = sortedIdx.map(infArr(_)).toArray
         val sortedBiases = sortedIdx.map(biasArr(_)).toArray
 
-        val nAgents    = req.agents.size
-        val nNeighbors = req.edges.size
-        val indexOffset = new Array[Int](nAgents)
-        var count = 0
-        for (i <- sortedSrc.indices) {
-            if (i != 0 && sortedSrc(i - 1) != sortedSrc(i)) {
-                indexOffset(count) = i
-                count += 1
-            }
-        }
-        if (nNeighbors > 0) indexOffset(indexOffset.length - 1) = nNeighbors
+        val indexOffset = buildEndOffsets(sortedTgt, req.agents.size)
 
         startCustomRun(
             DecodedCustomRun(
