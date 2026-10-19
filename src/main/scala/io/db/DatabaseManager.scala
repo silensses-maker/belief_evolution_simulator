@@ -1661,6 +1661,41 @@ object DatabaseManager {
         }
     }
 
+    // One persisted frame partition: one row of network_frames = one WS frame message.
+    final case class FrameRow(round: Int, startsAt: Int, frame: Array[Byte])
+
+    // Up to `limit` frame rows of a network strictly after (afterRound, afterStartsAt), ordered by
+    // (round, starts_at) — keyset pagination over network_frames_pkey. Each row is sent as its own
+    // WS message by the DB replay (#119); (-1, -1) starts from the first row.
+    def getFramePage(networkId: UUID, afterRound: Int, afterStartsAt: Int, limit: Int): IndexedSeq[FrameRow] = {
+        if (GlobalState.APP_MODE.skipDatabase) return IndexedSeq.empty
+        val conn = getConnection
+        var stmt: PreparedStatement = null
+        try {
+            stmt = conn.prepareStatement(
+                """SELECT round, starts_at, frame FROM public.network_frames
+                  | WHERE network_id = ? AND (round, starts_at) > (?, ?)
+                  | ORDER BY round, starts_at
+                  | LIMIT ?""".stripMargin
+            )
+            stmt.setObject(1, networkId)
+            stmt.setInt(2, afterRound)
+            stmt.setInt(3, afterStartsAt)
+            stmt.setInt(4, limit)
+            val rs = stmt.executeQuery()
+            val rows = IndexedSeq.newBuilder[FrameRow]
+            while (rs.next()) rows += FrameRow(rs.getInt(1), rs.getInt(2), rs.getBytes(3))
+            rows.result()
+        } catch {
+            case ex: Exception =>
+                Logger.logError(s"getFramePage($networkId, $afterRound, $afterStartsAt, $limit) failed: ${ex.getMessage}")
+                IndexedSeq.empty
+        } finally {
+            if (stmt != null) stmt.close()
+            conn.close()
+        }
+    }
+
     // Network ids that have persisted frames for a run, sorted (same order as
     // SimulationCache.getNetworkIds). Fallback of GET /simulations/{runId}/networks and source of
     // the WS DB replay when the in-memory cache no longer holds the run (#124). Uses

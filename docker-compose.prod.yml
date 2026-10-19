@@ -73,6 +73,9 @@ services:
       # Topes de memoria (MB) de topologías/resultados y buffers WS; vacío = default (#124)
       APP_SIM_CACHE_BUDGET_MB: ${APP_SIM_CACHE_BUDGET_MB:-}
       APP_WS_BUFFER_BUDGET_MB: ${APP_WS_BUFFER_BUDGET_MB:-}
+      # Tope (MB) de frames en cola por conexión WS y binario de topología por WS (#119)
+      APP_WS_CONNECTION_BUFFER_MB: ${APP_WS_CONNECTION_BUFFER_MB:-}
+      APP_WS_SEND_TOPOLOGY: ${APP_WS_SEND_TOPOLOGY:-false}
       JAVA_OPTS: ${BACKEND_JAVA_OPTS:-}
     volumes:
       # Ruta ABSOLUTA en el server al JSON del service account de Firebase.

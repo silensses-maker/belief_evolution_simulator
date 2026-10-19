@@ -104,6 +104,16 @@ APP_SKIP_WS=false
 # Defaults: min(512, heap/8) and min(1024, heap/4).
 APP_SIM_CACHE_BUDGET_MB=
 APP_WS_BUFFER_BUDGET_MB=
+# Per WS connection: binary frames queued and not yet sent (slow client). When
+# exceeded, the oldest queued frames are dropped; control events never are.
+# Default: min(32, heap/64).
+APP_WS_CONNECTION_BUFFER_MB=
+
+# ── WebSocket topology binary (optional) ──────────────────────────────────────
+# true = also send the CSR topology binary over the WebSocket before
+# `topology_ready` (several MB per large network). The frontend does not use
+# it (it reads GET /topology). Empty/false = not sent (default).
+APP_WS_SEND_TOPOLOGY=false
 
 # ── Firebase ──────────────────────────────────────────────────────────────────
 # Path of the service account JSON inside the container (keep as-is)
