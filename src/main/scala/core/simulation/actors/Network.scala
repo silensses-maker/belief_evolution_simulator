@@ -1,6 +1,6 @@
 package core.simulation.actors
 
-import akka.actor.{Actor, ActorRef, Props}
+import akka.actor.{Actor, ActorRef, OneForOneStrategy, Props, SupervisorStrategy}
 import akka.util.Timeout
 import core.model.agent.behavior.bias.CognitiveBiases.Bias
 import core.model.agent.behavior.silence.*
@@ -132,6 +132,14 @@ class Network(networkId: UUID, runMetadata: RunMetadata,
     val bimodal = new BimodalDistribution(0.25, 0.75)
     var names: Array[String] = null
     implicit val timeout: Timeout = Timeout(600.seconds)
+    
+    // Lifecycle only (#124): an AgentProcessor that fails used to be restarted, losing the in-flight
+    // round so this network waited forever. Escalate instead, so the Monitor ends the run in status
+    // 'error'. Other children (DB savers) keep Akka's default decider. sender() is the failed child.
+    override val supervisorStrategy: SupervisorStrategy = OneForOneStrategy() {
+        case _ if agents.contains(sender()) => SupervisorStrategy.Escalate
+        case cause => SupervisorStrategy.defaultDecider.applyOrElse(cause, (_: Throwable) => SupervisorStrategy.Escalate)
+    }
     
     def receive: Receive = building
     

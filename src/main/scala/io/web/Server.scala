@@ -151,6 +151,19 @@ object BinaryProtocol {
 object Server {
     
     import BinaryProtocol.*
+
+    // ── Retention of ephemeral run data (#124) ──────────────────────────────────
+    // The cron below calls cleanupEphemeralFrames(EphemeralFramesGraceMinutes) every
+    // EphemeralFramesCleanupPeriodMinutes (first tick 5 min after startup), so the frames of an
+    // 'ephemeral' run survive between grace and grace + period after its completed_at. The
+    // in-memory topology / results / network ids of a terminal ephemeral run (SimulationCache) are
+    // kept for grace + period + a 5-minute margin for cron drift (95 min), so /topology, /results
+    // and /networks never disappear before the frames do. A backend restart still loses the
+    // in-memory part (frames remain until the cleanup).
+    final val EphemeralFramesGraceMinutes: Int = 60
+    final val EphemeralFramesCleanupPeriodMinutes: Int = 30
+    final val EphemeralSnapshotRetentionMinutes: Int =
+        EphemeralFramesGraceMinutes + EphemeralFramesCleanupPeriodMinutes + 5
     
     private var initialized = false
     private var system: Option[ActorSystem] = None
@@ -338,6 +351,15 @@ object Server {
             }
         }
         
+        // Startup reconciliation (#124): runs left 'running' by a previous process died with it.
+        // Done before binding, so no run of this process exists yet.
+        val reconciled = DatabaseManager.reconcileOrphanedRuns()
+        if (reconciled > 0)
+            Logger.log(s"Startup reconciliation: $reconciled run(s) left 'running' by a previous process set to 'error'")
+        Logger.log(f"In-memory run stores: SimulationCache budget ${SimulationCache.budgetBytes / 1048576.0}%.0f MB, " +
+            f"WS buffer budget ${WsRegistry.globalBudgetBytes / 1048576.0}%.0f MB, " +
+            s"ephemeral snapshot retention $EphemeralSnapshotRetentionMinutes min after the run ends")
+
         // Periodic cleanup every 60 seconds
         import scala.concurrent.duration.*
         actorSystem.scheduler.scheduleWithFixedDelay(60.seconds, 60.seconds)(() => {
@@ -345,10 +367,10 @@ object Server {
             WsRegistry.cleanup()
         })(actorSystem.dispatcher)
 
-        // Ephemeral frame cleanup runs less often (storage cost, not correctness).
-        // Grace window: 60 minutes after a run leaves 'running'.
-        actorSystem.scheduler.scheduleWithFixedDelay(5.minutes, 30.minutes)(() => {
-            val deleted = DatabaseManager.cleanupEphemeralFrames(60)
+        // Ephemeral frame cleanup runs less often (storage cost, not correctness). Grace window and
+        // period: see EphemeralFramesGraceMinutes / EphemeralFramesCleanupPeriodMinutes above.
+        actorSystem.scheduler.scheduleWithFixedDelay(5.minutes, EphemeralFramesCleanupPeriodMinutes.minutes)(() => {
+            val deleted = DatabaseManager.cleanupEphemeralFrames(EphemeralFramesGraceMinutes)
             if (deleted > 0) Logger.log(s"cleanupEphemeralFrames removed $deleted rows")
         })(actorSystem.dispatcher)
 
@@ -553,8 +575,8 @@ object Server {
                 } ~
                 // Routes by runId
                 pathPrefix(LongNumber) { runId =>
-                    // GET /simulations/{runId}
                     pathEndOrSingleSlash {
+                        // GET /simulations/{runId}
                         get {
                             authenticate { authUser =>
                                 DatabaseManager.getRunSummary(runId) match {
@@ -568,23 +590,36 @@ object Server {
                                                 errorJson("forbidden", "Access denied"))
                                 }
                             }
-                        }
-                    } ~
-                    // DELETE /simulations/{runId}
-                    delete {
-                        authenticate { authUser =>
-                            DatabaseManager.getRunOwner(runId) match {
-                                case None => complete(StatusCodes.NotFound ->
-                                    errorJson("not_found", "Run not found"))
-                                case Some(ownerId) =>
-                                    if (ownerId == authUser.dbUserId || authUser.isAdmin) {
-                                        DatabaseManager.setRunStatus(runId, "cancelled")
-                                        monitor ! CancelRun(runId)
-                                        complete(jsonOk(s"""{"runId":"$runId","cancelled":true}"""))
-                                    } else {
+                        } ~
+                        // DELETE /simulations/{runId} — cancels a RUNNING run. Only the run path itself
+                        // matches (it used to match any subpath). A finished run keeps its terminal
+                        // status: 409 conflict (#124).
+                        delete {
+                            authenticate { authUser =>
+                                DatabaseManager.getRunSummary(runId) match {
+                                    case None => complete(StatusCodes.NotFound ->
+                                        errorJson("not_found", "Run not found"))
+                                    case Some(run) if !run.userId.contains(authUser.dbUserId) && !authUser.isAdmin =>
                                         complete(StatusCodes.Forbidden ->
                                             errorJson("forbidden", "Access denied"))
-                                    }
+                                    case Some(run) if run.status != "running" =>
+                                        complete(StatusCodes.Conflict ->
+                                            errorJson("conflict", "Run already finished"))
+                                    case Some(_) =>
+                                        // Conditional on status = 'running': false means the run
+                                        // finished between the read above and this update (or
+                                        // the update itself failed — then it is still running).
+                                        if (DatabaseManager.setRunStatus(runId, "cancelled")) {
+                                            monitor ! CancelRun(runId)
+                                            complete(jsonOk(s"""{"runId":"$runId","cancelled":true}"""))
+                                        } else if (DatabaseManager.getRunSummary(runId).exists(_.status == "running")) {
+                                            complete(StatusCodes.InternalServerError ->
+                                                errorJson("internal_error", "Failed to cancel the run"))
+                                        } else {
+                                            complete(StatusCodes.Conflict ->
+                                                errorJson("conflict", "Run already finished"))
+                                        }
+                                }
                             }
                         }
                     } ~
@@ -599,7 +634,11 @@ object Server {
                                         complete(StatusCodes.Forbidden ->
                                             errorJson("forbidden", "Access denied"))
                                     case _ =>
-                                        val ids = SimulationCache.getNetworkIds(runId)
+                                        // Cache first (live runs, retention window); when it no
+                                        // longer holds the run, the networks that still have
+                                        // persisted frames (#124).
+                                        val cached = SimulationCache.getNetworkIds(runId)
+                                        val ids = if (cached.nonEmpty) cached else DatabaseManager.getFrameNetworkIds(runId)
                                         val items = ids.map(id => s""""$id"""").mkString(",")
                                         complete(jsonOk(s"""{"runId":"$runId","networks":[$items]}"""))
                                 }
@@ -905,6 +944,24 @@ object Server {
         WsRegistry.dispatchText(runId, json)
     }
 
+    /**
+     * WS control event of a run that ended in status `error` (#124). Same `event: "error"` shape the
+     * frontend handles; `runId` routes it to the run's subscription.
+     */
+    def runErrorEventJson(runId: Long, message: String): String =
+        JsObject(
+            "event"   -> JsString("error"),
+            "runId"   -> JsString(runId.toString),
+            "code"    -> JsString("run_failed"),
+            "message" -> JsString(message)
+        ).compactPrint
+
+    /** Starts the post-run retention of every in-memory store of a run (#124). */
+    def markRunTerminal(runId: Long): Unit = {
+        WsRegistry.markTerminal(runId)
+        SimulationCache.markTerminal(runId)
+    }
+
     private def topologyPageJson(snap: TopologySnapshot, runId: Long, networkId: String,
         aOff: Int, aLim: Int, eOff: Int, eLim: Int): String = {
         val aEnd = math.min(aOff + aLim, snap.agentCount)
@@ -998,6 +1055,7 @@ object Server {
             )
         }
 
+        SimulationCache.registerRun(runID, persistent = frameRetention == "persistent")
         monitor.get ! AddNetworks(
             runID, agentTypes, biases, confidenceParams,
             Uniform, convertedSaveMode, numberOfNetworks, density,
@@ -1445,6 +1503,7 @@ object Server {
                     "internal_error", "The custom run could not be saved, so it was not started")))
         }
 
+        SimulationCache.registerRun(runID, persistent = frameRetention == "persistent")
         monitor.get ! RunCustomNetwork(CustomRunInfo(
             runID                = runID,
             stopThreshold        = run.stopThreshold,

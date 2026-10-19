@@ -98,6 +98,13 @@ APP_GENERAL_LOGS=true
 APP_SIMULATION_LOGS=false
 APP_SKIP_WS=false
 
+# ── In-memory run data budgets (optional, MB; empty = default) ────────────────
+# Topology/results snapshots and WS replay buffers of all runs. When exceeded,
+# the oldest finished runs are evicted first; running runs never are.
+# Defaults: min(512, heap/8) and min(1024, heap/4).
+APP_SIM_CACHE_BUDGET_MB=
+APP_WS_BUFFER_BUDGET_MB=
+
 # ── Firebase ──────────────────────────────────────────────────────────────────
 # Path of the service account JSON inside the container (keep as-is)
 GOOGLE_APPLICATION_CREDENTIALS=/secrets/firebase-sa.json

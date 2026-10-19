@@ -54,6 +54,9 @@ services:
       APP_GENERAL_LOGS: ${APP_GENERAL_LOGS}
       APP_SIMULATION_LOGS: ${APP_SIMULATION_LOGS}
       APP_SKIP_WS: ${APP_SKIP_WS}
+      # Topes de memoria (MB) de topologías/resultados y buffers WS; vacío = default (#124)
+      APP_SIM_CACHE_BUDGET_MB: ${APP_SIM_CACHE_BUDGET_MB:-}
+      APP_WS_BUFFER_BUDGET_MB: ${APP_WS_BUFFER_BUDGET_MB:-}
       # Heap/flags de la JVM, p.ej. BACKEND_JAVA_OPTS=-Xmx8g
       JAVA_OPTS: ${BACKEND_JAVA_OPTS:-}
     volumes:

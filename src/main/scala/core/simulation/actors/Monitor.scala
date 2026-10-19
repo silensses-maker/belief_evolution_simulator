@@ -1,6 +1,6 @@
 package core.simulation.actors
 
-import akka.actor.{Actor, ActorRef, PoisonPill, Props}
+import akka.actor.{Actor, ActorRef, OneForOneStrategy, PoisonPill, Props, SupervisorStrategy}
 import core.model.agent.behavior.bias.CognitiveBiases.Bias
 import core.model.agent.behavior.silence.SilenceEffects.SilenceEffect
 import core.model.agent.behavior.silence.SilenceStrategies.SilenceStrategy
@@ -10,7 +10,6 @@ import io.db.DatabaseManager
 import io.persistence.RoundRouter
 import io.persistence.actors.{FlushDone, FrameSaverRouter}
 import io.web.{CustomRunInfo, Server}
-import io.web.ws.WsRegistry
 import utils.datastructures.SnowflakeID
 import utils.logging.Logger
 import utils.rng.distributions.{CustomDistribution, Distribution, Uniform}
@@ -145,6 +144,29 @@ class Monitor extends Actor {
     // Testing performance end
     val simulationTimers = new CustomMultiTimer
     
+    // Lifecycle only (#124). A failing Run — its own exception, or one escalated by its Networks /
+    // AgentProcessors — is stopped and ends in status 'error' (subscribers notified) instead of
+    // Akka's default restart, which re-ran the Run constructor or left the run 'running' forever.
+    // Run children no longer tracked (already cancelled / completed) are just stopped; every other
+    // child (savers) keeps Akka's default decider. In the decider, sender() is the failed child.
+    override val supervisorStrategy: SupervisorStrategy = OneForOneStrategy() {
+        case cause if activeRuns.get(sender().path.name).exists(_._1 == sender()) =>
+            failRun(sender().path.name, cause)
+            SupervisorStrategy.Stop
+        case _ if isRunActorName(sender().path.name) =>
+            SupervisorStrategy.Stop
+        case cause =>
+            SupervisorStrategy.defaultDecider.applyOrElse(cause, (_: Throwable) => SupervisorStrategy.Escalate)
+    }
+    
+    // Lifecycle only (#124): a Monitor restart stops every Run child, so end the runs it was
+    // tracking in 'error' instead of leaving them 'running' until the next process start.
+    override def preRestart(reason: Throwable, message: Option[Any]): Unit = {
+        Logger.logError(s"Monitor restarting; ${runIds.size} active run(s) end in status 'error'", reason)
+        runIds.values.foreach(endRunWithError(_, "The simulation stopped because of an internal error"))
+        super.preRestart(reason, message)
+    }
+    
     def receive: Receive = {
         case RunCustomNetwork(customInfo) =>
             totalRuns += 1
@@ -235,8 +257,12 @@ class Monitor extends Actor {
         case RunComplete =>
             Logger.log("\nThe run has been complete\n")
             val senderActor = sender().path.name
-            simulationTimers.stop(senderActor)
-            memoryLeft += activeRuns(senderActor)._2
+            stopRunTimer(senderActor)
+            // The Run actor stops itself after sending this, once its networks have terminated
+            // (Run.scala, #124); nothing here or in FlushDone below needs it.
+            // get: a run cancelled while its last network finished is no longer tracked (#124);
+            // apply() threw here and crashed the Monitor.
+            activeRuns.get(senderActor).foreach { case (_, mem) => memoryLeft += mem }
             // Persist any pending frames before announcing completion so /frames and WS replay
             // don't see a 'completed but empty' window. FlushDone returns to this actor.
             runIds.get(senderActor).foreach { runId =>
@@ -248,24 +274,24 @@ class Monitor extends Actor {
 
         case FlushDone(runId) =>
             Server.sendControlEvent(runId, s"""{"event":"run_completed","runId":"$runId"}""")
-            WsRegistry.markTerminal(runId)
+            Server.markRunTerminal(runId)
 
         case CancelRun(runId) =>
             runIds.find { case (_, id) => id == runId } match {
                 case Some((senderActor, _)) =>
                     Logger.log(s"\nCancelling run $runId ($senderActor)\n")
                     activeRuns.get(senderActor).foreach { case (actorRef, mem) =>
-                        actorRef ! PoisonPill
+                        actorRef ! PoisonPill // stops the Run and, with it, its Networks / AgentProcessors
                         memoryLeft += mem
                     }
-                    simulationTimers.stop(senderActor)
+                    stopRunTimer(senderActor)
                     activeRuns -= senderActor
                     runIds     -= senderActor
-                    WsRegistry.markTerminal(runId)
+                    Server.markRunTerminal(runId)
                 case None =>
                     // Run is no longer active in this Monitor (already completed, never started, or unknown).
-                    // The HTTP handler still persists status='cancelled' in DB; this is a no-op for the actor system.
-                    WsRegistry.markTerminal(runId)
+                    // The HTTP handler only cancels runs still 'running' in DB; this is a no-op for the actor system.
+                    Server.markRunTerminal(runId)
             }
 
         case GetStatus =>
@@ -277,6 +303,40 @@ class Monitor extends Actor {
             
     }
     
+    
+    // Run actors are the only children named R<number> (savers are RoundSaver<i> / FrameSaver).
+    private def isRunActorName(name: String): Boolean =
+        name.length > 1 && name.head == 'R' && name.tail.forall(_.isDigit)
+    
+    // Lifecycle only (#124): stops a TRACKED run's timer (logs its duration, as before) and drops
+    // its entry, which used to stay in `simulationTimers` for the life of the process. Must run
+    // before the run is removed from `activeRuns`. No-op for an untracked run (e.g. a RunComplete
+    // sent by a run already cancelled): its entry is gone and stop() would throw, crashing the Monitor.
+    private def stopRunTimer(name: String): Unit =
+        if (activeRuns.contains(name)) {
+            simulationTimers.stop(name)
+            simulationTimers.remove(name)
+        }
+    
+    // Called from the supervisor decider (Monitor's thread) for a tracked Run that failed.
+    private def failRun(name: String, cause: Throwable): Unit = {
+        val runId = runIds.get(name)
+        Logger.logError(s"Run ${runId.getOrElse("?")} ($name) failed; it ends in status 'error'", cause)
+        activeRuns.get(name).foreach { case (_, mem) => memoryLeft += mem }
+        stopRunTimer(name)
+        activeRuns -= name
+        runIds     -= name
+        runId.foreach(endRunWithError(_, s"Simulation failed: ${cause.getClass.getSimpleName}"))
+    }
+    
+    // Terminal 'error': DB status + completed_at (only if still 'running'), flush of the frames
+    // persisted so far, WS `error` event for subscribers, post-run retention of the in-memory stores.
+    private def endRunWithError(runId: Long, message: String): Unit = {
+        DatabaseManager.setRunStatus(runId, "error")
+        FrameSaverRouter.saveRemainingData()
+        Server.sendControlEvent(runId, Server.runErrorEventJson(runId, message))
+        Server.markRunTerminal(runId)
+    }
     
     private def trackRunMemory(runActor: ActorRef, runId: Long, numberOfNetworks: Int, agentsPerNetwork: Int, neighborsPerNetwork: Int): Unit = {
         val runMemoryUsage = (numberOfNetworks * agentsPerNetwork * 64) +

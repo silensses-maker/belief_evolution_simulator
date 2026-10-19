@@ -20,6 +20,27 @@ info:
 
     **Cognitive biases:** `0` = DEGROOT, `1` = CONFIRMATION, `2` = BACKFIRE, `3` = AUTHORITY, `4` = INSULAR
 
+    **Retention of run data.** Only the run row and, with `persistFrames=true`, the round frames
+    (`network_frames`) are persisted. Topology / results snapshots and the network list live in
+    backend memory with a retention driven by the run state:
+
+    | Data | While `running` | After the run ends (`completed` / `cancelled` / `error`) |
+    |---|---|---|
+    | Frames, `frameRetention=ephemeral` | kept | deleted 60–90 min after `completed_at` (cleanup: 60 min grace, every 30 min) |
+    | Frames, `frameRetention=persistent` | kept | kept (Administrators only) |
+    | Topology / results / network ids (memory), ephemeral run | kept | kept 95 min after the run ends (outlasts its frames) |
+    | Topology / results / network ids (memory), persistent run | kept | kept while the backend process lives |
+    | WS replay buffer (memory) | kept (oldest frames dropped past 200 MB) | 60 min, then DB replay |
+
+    Memory is additionally capped by `APP_SIM_CACHE_BUDGET_MB` (snapshots, default
+    min(512 MB, heap/8)) and `APP_WS_BUFFER_BUDGET_MB` (WS buffers of all runs, default
+    min(1024 MB, heap/4)); when a cap is exceeded the oldest **finished** runs are evicted first and
+    running runs never are (WS buffers then drop the oldest binary frames of the largest running
+    buffer; control events are never dropped). **A backend restart loses everything in memory**:
+    `/networks` then falls back to the networks that still have persisted frames, while `/topology`
+    and `/results` answer `202` (the snapshot will not come back). Runs left `running` by the
+    previous process are set to `error` at startup.
+
 servers:
   # Relativo al origen de la página que sirve estos docs: en prod resuelve a
   # https://silensess.lipn.univ-paris13.fr/api y en local a
@@ -128,8 +149,13 @@ components:
             Run lifecycle state.
             - `running`: at least one network is still active. Initial state at run creation.
             - `completed`: `Monitor` emitted `run_completed` (all networks done — converged or hit iteration limit).
-            - `cancelled`: `DELETE /simulations/{runId}` was processed.
-            - `error`: runtime error halted the run.
+            - `cancelled`: `DELETE /simulations/{runId}` was processed while the run was `running`.
+            - `error`: the run stopped abnormally — an actor of the run failed (subscribers receive the
+              WS `error` event), or the backend process ended (restart / crash) while the run was
+              `running`: such rows are set to `error` when the next process starts.
+
+            The three terminal states set `completed_at` and are final: a terminal status is never
+            overwritten (`DELETE` on a finished run answers `409`).
 
             Convergence is per-network and surfaces via the `network_converged` WS event;
             at the run level a converged run is just `completed`.
@@ -254,8 +280,8 @@ components:
           enum: [ephemeral, persistent]
           default: ephemeral
           description: |
-            Retention policy for persisted frames. `ephemeral` (default) deletes frames ~60 minutes
-            after the run leaves the `running` state. `persistent` keeps them indefinitely and is
+            Retention policy for persisted frames. `ephemeral` (default) deletes frames 60–90 minutes
+            after the run leaves the `running` state (60 min grace, cleanup every 30 min). `persistent` keeps them indefinitely and is
             restricted to users with the `Administrator` role; non-admins requesting `persistent`
             receive `403 forbidden`.
 
@@ -356,7 +382,7 @@ components:
           enum: [ephemeral, persistent]
           default: ephemeral
           description: |
-            `ephemeral` deletes frames ~60 minutes after the run leaves `running`. `persistent`
+            `ephemeral` deletes frames 60–90 minutes after the run leaves `running`. `persistent`
             keeps them indefinitely and is restricted to Administrators.
 
 security:
@@ -814,8 +840,15 @@ paths:
                 $ref: '#/components/schemas/Error'
     delete:
       tags: [Simulations]
-      summary: Cancel / delete a run
-      description: Owner or Administrator only.
+      summary: Cancel a running run
+      description: |
+        Owner or Administrator only. Cancels a run that is still `running`: its status becomes
+        `cancelled` (with `completed_at`) and the simulation is stopped. Nothing is deleted — the run
+        row stays and its frames follow `frameRetention`.
+
+        A run that already finished (`completed`, `cancelled` or `error`) keeps its status and the
+        request answers `409 conflict`. Only `/simulations/{runId}` itself accepts `DELETE`; sub-paths
+        such as `/simulations/{runId}/networks` do not.
       parameters:
         - name: runId
           in: path
@@ -847,14 +880,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '409':
+          description: The run already finished; its terminal status is kept.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: conflict
+                message: Run already finished
+        '500':
+          description: "`internal_error` — the status could not be updated; the run was not cancelled."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
 
   /simulations/{runId}/networks:
     get:
       tags: [Simulations]
       summary: List networks for a run
       description: |
-        Returns the networkIds cached after `topology_ready`. Empty array if the run
-        has not yet emitted `topology_ready`. Owner or Administrator only.
+        Returns the networkIds whose topology is held in memory (cached at `topology_ready`, kept
+        while the run is `running` and for the retention window after it ends — see "Retention of
+        run data"), sorted by networkId (UUID v7, so roughly creation order).
+
+        When memory no longer holds the run (retention expired, memory budget, backend restart), it
+        falls back to the networks that still have persisted frames
+        (`SELECT DISTINCT network_id FROM network_frames WHERE run_id = ?`, same order). In that case
+        `/topology` and `/results` may answer `202` for those networks — only the frames remain.
+
+        Empty array if the run has not yet emitted `topology_ready`, or if it finished and neither its
+        snapshots nor any frames are retained. Owner or Administrator only.
       parameters:
         - name: runId
           in: path
@@ -888,8 +945,10 @@ paths:
       summary: Get initial network topology
       description: |
         Returns the full graph snapshot captured at simulation start (after `topology_ready` event).
-        Returns `202 Accepted` if the simulation has not yet reached `topology_ready`.
-        Owner or Administrator only.
+        Returns `202 Accepted` if the snapshot is not in memory: for a `running` run, the network has
+        not yet reached `topology_ready`; for a finished run, it is no longer retained (retention
+        window, memory budget or backend restart — see "Retention of run data") and will not come
+        back. Owner or Administrator only.
       parameters:
         - name: runId
           in: path
@@ -993,7 +1052,9 @@ paths:
                           enum: [0, 1, 2, 3, 4]
                           description: "0=DEGROOT, 1=CONFIRMATION, 2=BACKFIRE, 3=AUTHORITY, 4=INSULAR"
         '202':
-          description: Topology not yet available — retry after `topology_ready` event
+          description: |
+            Topology not available — retry after `topology_ready` while the run is `running`; for a
+            finished run the snapshot is no longer retained.
         '403':
           description: Forbidden
         '404':
@@ -1005,7 +1066,8 @@ paths:
       summary: Get final network results
       description: |
         Returns per-agent final beliefs captured at convergence (after `network_converged` event).
-        Returns `202 Accepted` if the simulation has not yet converged.
+        Returns `202 Accepted` if the snapshot is not in memory: the network has not converged yet,
+        or — for a finished run — it is no longer retained (see "Retention of run data").
         Owner or Administrator only.
       parameters:
         - name: runId
@@ -1070,7 +1132,9 @@ paths:
                           type: number
                           format: float
         '202':
-          description: Results not yet available — retry after `network_converged` event
+          description: |
+            Results not available — retry after `network_converged` while the run is `running`; for
+            a finished run the snapshot is no longer retained.
         '403':
           description: Forbidden
         '404':
@@ -1175,22 +1239,32 @@ paths:
         ```
 
         **Replay buffer.** The server keeps every event emitted for a run (control events and
-        binary frames, in original wire order) in an in-memory buffer keyed by `runId`. On
+        binary frames, in original wire order) in an in-memory buffer keyed by `runId` — created on
+        the run's first event even before anyone subscribes, so late subscribers (the run starts
+        before the client's `subscribe`, page refreshes, reconnects) still get the beginning. On
         subscribe the buffer is drained to the client before live events flow, so a subscriber
         joining mid-run or just after `run_completed` sees the full sequence — including
         `network_started` and any binary frames already emitted. The buffer is evicted 60
         minutes after the run reaches a terminal state, after which the server falls back to
         a DB-backed replay.
 
+        Byte caps only ever drop **binary frames** (oldest first); control events are never dropped
+        while the buffer lives. Per run the cap is 200 MB; across all runs `APP_WS_BUFFER_BUDGET_MB`
+        (default min(1024 MB, heap/4)) — when it is exceeded, buffers of finished runs are evicted
+        first (oldest first; their subscribers get the DB replay), then the oldest frames of the
+        largest running buffer are dropped.
+
         **If the run is still running:** the server registers the connection, drains the
         buffer (any events emitted before subscribe), and live events continue to flow.
 
         **If the run is already completed:** the buffer drain delivers the full sequence
         in the same order as live emission — see "Live event order per network" below.
-        After 60 minutes the buffer is gone and the server falls back to DB replay
-        (`topology_ready` → `network_started` → frame binaries if `persistFrames=true` →
-        `network_converged` → `run_completed`; the topology binary is **not** replayed from
-        DB — fetch it via `GET /topology` if you need it).
+        After 60 minutes the buffer is gone and the server falls back to DB replay, for every
+        network that has persisted frames (`network_frames.run_id`): `topology_ready` →
+        `network_started` → frame binaries if `persistFrames=true` → `network_converged` (only
+        while the results snapshot is still in memory) → `run_completed`, or the `error` event if
+        the run's status is `error`. The topology binary is **not** replayed from DB — fetch it via
+        `GET /topology` while it is retained.
 
         **If the run does not exist:**
         ```json
@@ -1214,7 +1288,8 @@ paths:
            until convergence or iteration limit.
         5. `network_converged` JSON event.
 
-        After every network finishes, the run emits `run_completed`.
+        After every network finishes, the run emits `run_completed`. If the run fails instead, it
+        emits `error` (and its status becomes `error`); no `run_completed` follows.
 
         ## Control events (server → client, JSON text frames)
 
@@ -1223,7 +1298,13 @@ paths:
         {"event": "network_started",   "runId": "...", "networkId": "..."}
         {"event": "network_converged", "runId": "...", "networkId": "...", "round": 10, "consensus": true}
         {"event": "run_completed",     "runId": "..."}
+        {"event": "error",             "runId": "...", "code": "run_failed", "message": "Simulation failed: ..."}
         ```
+
+        `error` is terminal for the run: an actor of the run failed, the run was stopped and its status
+        is `error`. `message` is a short human-readable reason. Runs killed by a backend restart are
+        not notified live (the connection is gone); they show `error` in `GET /simulations/{runId}`
+        and in the DB replay.
 
         On `topology_ready`, the network topology is already in your buffer as the preceding
         binary message; you can also fetch it via `GET /simulations/{runId}/networks/{networkId}/topology`
