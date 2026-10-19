@@ -47,6 +47,17 @@ info:
     and `/results` answer `202` (the snapshot will not come back). Runs left `running` by the
     previous process are set to `error` at startup.
 
+    **Removed legacy endpoints (#121).** The anonymous binary endpoints `POST /run`,
+    `POST /custom` and `GET /neighbors` (also under `/api`) were removed after their Sunset date
+    (2026-09-01) and are no longer part of this spec. Any method on those exact paths answers
+    `410 Gone` with `{"error": "gone", "message": "..."}` and a `Link` header with RELATIVE
+    references (resolved against the requested URL, so they keep the `/api` prefix):
+    `<simulations/generated>; rel="successor-version"` for `/run`,
+    `<simulations/custom>; rel="successor-version"` for `/custom` and `/neighbors`, plus
+    `<docs>; rel="service-doc"`. The request body is not read and no run is started. Use the
+    authenticated `POST /simulations/generated` and `POST /simulations/custom` instead (the binary
+    `application/octet-stream` variant of the latter takes the former `POST /custom` payload).
+
 servers:
   # Relativo al origen de la página que sirve estos docs: en prod resuelve a
   # https://silensess.lipn.univ-paris13.fr/api y en local a
@@ -408,8 +419,6 @@ tags:
   - name: Users
   - name: Simulations
   - name: WebSocket
-  - name: Legacy
-    description: Deprecated binary-protocol endpoints. Will be removed after 2026-09-01.
 
 paths:
 
@@ -630,7 +639,7 @@ paths:
       description: >
         Accepts two content types. Use `application/json` for networks with fewer than 1000
         agents. For larger networks, send `application/octet-stream` with the binary
-        little-endian payload (same format as the legacy `POST /custom` endpoint) to avoid
+        little-endian payload (the format of the removed legacy `POST /custom`) to avoid
         serializing a large JSON body. The binary payload has no `persistFrames` /
         `frameRetention` fields, so the binary variant takes them as query parameters.
       parameters:
@@ -696,8 +705,9 @@ paths:
               format: binary
             description: >
               Binary payload (little-endian). Recommended for networks with 1000 or more
-              agents. Format is identical to the legacy `POST /custom` binary protocol
-              (see that endpoint for the byte layout reference). String length prefixes are
+              agents. Format is identical to the binary protocol of the removed legacy
+              `POST /custom` (byte layout: `Server.decodeCustomRunUnchecked` in the backend,
+              `custom-simulation-encoder.ts` in the frontend). String length prefixes are
               unsigned bytes. Subject to the same validation, role quotas and persistence as the
               JSON variant (a `custom_runs` row owned by the caller), including the 32-character
               limit on the network and agent names, unique agent names and unique edges. Frame
@@ -1476,65 +1486,3 @@ paths:
           description: Switching Protocols — WebSocket connection established
         '400':
           description: Not a WebSocket upgrade request
-
-  # ── Legacy ─────────────────────────────────────────────────────────────────
-
-  /run:
-    post:
-      tags: [Legacy]
-      deprecated: true
-      summary: "[Deprecated] Start generated run — binary protocol"
-      description: |
-        Use `POST /simulations/generated` instead.
-        Responses include `Deprecation`, `Sunset` (2026-09-01), `Link`, and `Warning` headers.
-      requestBody:
-        required: true
-        content:
-          application/octet-stream:
-            schema:
-              type: string
-              format: binary
-      security: []
-      responses:
-        '200':
-          description: Run ID as plain string
-          content:
-            text/plain:
-              schema:
-                type: string
-                description: Snowflake run ID
-
-  /custom:
-    post:
-      tags: [Legacy]
-      deprecated: true
-      summary: "[Deprecated] Start custom run — binary protocol"
-      description: Use `POST /simulations/custom` instead.
-      requestBody:
-        required: true
-        content:
-          application/octet-stream:
-            schema:
-              type: string
-              format: binary
-      security: []
-      responses:
-        '200':
-          description: Run ID as plain string
-          content:
-            text/plain:
-              schema:
-                type: string
-                description: Snowflake run ID
-        '400':
-          description: "`invalid_body` — malformed binary payload (same checks as `POST /simulations/custom`)."
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'
-        '500':
-          description: "`internal_error` — the run could not be saved; it was NOT started."
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/Error'

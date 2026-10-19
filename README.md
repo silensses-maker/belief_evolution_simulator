@@ -115,6 +115,12 @@ APP_WS_CONNECTION_BUFFER_MB=
 # it (it reads GET /topology). Empty/false = not sent (default).
 APP_WS_SEND_TOPOLOGY=false
 
+# ── Legacy endpoints /run, /custom, /neighbors (DEV/TEST ONLY) ────────────────
+# Removed (#121): by default they answer 410 Gone. true = restores their old
+# behavior: ANONYMOUS, no usage limits. NEVER enable it in production (see
+# "Removed legacy endpoints" below).
+APP_ENABLE_LEGACY_ROUTES=false
+
 # ── Firebase ──────────────────────────────────────────────────────────────────
 # Path of the service account JSON inside the container (keep as-is)
 GOOGLE_APPLICATION_CREDENTIALS=/secrets/firebase-sa.json
@@ -199,6 +205,32 @@ http://localhost:9000/docs
 ```
 
 The raw OpenAPI spec is at `http://localhost:9000/openapi.yaml`.
+
+### Removed legacy endpoints
+
+The anonymous binary endpoints `POST /run`, `POST /custom` and `GET /neighbors` (also mounted under `/api`) were deprecated in 2.0.0 (#85) and removed after their Sunset date, 2026-09-01 (#121). Any method on those exact paths now answers `410 Gone`, without reading the body or starting a run:
+
+```http
+HTTP/1.1 410 Gone
+Link: <simulations/generated>; rel="successor-version", <docs>; rel="service-doc"
+Content-Type: application/json
+
+{"error":"gone","message":"This legacy endpoint was removed; use POST /simulations/generated (authenticated, see /docs)"}
+```
+
+The `Link` targets are relative references (resolved against the requested URL, so `/api/run` points to `/api/simulations/generated`); `/custom` and `/neighbors` point to `simulations/custom`. Use the authenticated `POST /simulations/generated` and `POST /simulations/custom` instead; the latter also accepts the former `/custom` binary payload as `application/octet-stream`.
+
+Every 410 answer is still recorded in the `legacy_endpoint_usage` table (migration 003; at most 4 inserts in flight, extra calls are not recorded), so remaining callers can be found with:
+
+```sql
+SELECT endpoint, user_agent, ip, count(*) AS calls, max(called_at) AS last_call
+FROM public.legacy_endpoint_usage
+WHERE called_at > now() - interval '30 days'
+GROUP BY endpoint, user_agent, ip
+ORDER BY last_call DESC;
+```
+
+**`APP_ENABLE_LEGACY_ROUTES=true` (dev/test only).** Restores the old routes unchanged (anonymous, no usage limits, `/run` without bounds checks, `Deprecation`/`Sunset` headers). It exists only to start a run in a throwaway local container without a Firebase token. **Never enable it in production**: `docker-compose.prod.yml` pins it to `false`, and the backend logs a `WARNING` at startup whenever it is on.
 
 ---
 

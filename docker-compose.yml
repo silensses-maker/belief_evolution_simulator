@@ -60,6 +60,9 @@ services:
       # Tope (MB) de frames en cola por conexión WS y binario de topología por WS (#119)
       APP_WS_CONNECTION_BUFFER_MB: ${APP_WS_CONNECTION_BUFFER_MB:-}
       APP_WS_SEND_TOPOLOGY: ${APP_WS_SEND_TOPOLOGY:-false}
+      # Endpoints legacy /run, /custom, /neighbors (#121): false = 410 Gone. true los
+      # reactiva ANÓNIMOS y sin cuotas: SOLO dev/test, NUNCA en producción.
+      APP_ENABLE_LEGACY_ROUTES: ${APP_ENABLE_LEGACY_ROUTES:-false}
       # Heap/flags de la JVM, p.ej. BACKEND_JAVA_OPTS=-Xmx8g
       JAVA_OPTS: ${BACKEND_JAVA_OPTS:-}
     volumes:
