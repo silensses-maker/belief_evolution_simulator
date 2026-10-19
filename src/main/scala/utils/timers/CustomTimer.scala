@@ -54,6 +54,9 @@ class CustomMultiTimer {
         duration
     }
     
+    /** Forgets a key (no-op when absent), so a long-lived timer does not keep every key ever started. */
+    def remove(key: String): Unit = times.remove(key)
+    
     /**
      * Gets the duration in nanoseconds for a given key, only works if the timer has finished
      * @param key Identifier

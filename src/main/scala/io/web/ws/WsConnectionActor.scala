@@ -8,7 +8,7 @@ import akka.stream.scaladsl.Sink
 import akka.util.ByteString
 import com.google.firebase.auth.FirebaseAuth
 import io.db.DatabaseManager
-import io.web.SimulationCache
+import io.web.{Server, SimulationCache}
 import io.web.auth.AuthenticatedUser
 import spray.json.*
 import DefaultJsonProtocol.*
@@ -124,7 +124,7 @@ class WsConnectionActor(outRef: ActorRef)(implicit mat: Materializer) extends Ac
 
             case Some(summary) if isTerminalStatus(summary.status) =>
                 // Buffer evicted (run is old); fall back to DB-backed replay.
-                replayFromDatabase(runId)
+                replayFromDatabase(runId, summary.status)
 
             case Some(_) =>
                 // Running but nothing emitted yet — live events will arrive via Dispatch.
@@ -134,9 +134,12 @@ class WsConnectionActor(outRef: ActorRef)(implicit mat: Materializer) extends Ac
     private def isTerminalStatus(status: String): Boolean =
         status == "completed" || status == "cancelled" || status == "error"
 
-    private def replayFromDatabase(runId: Long): Unit = {
-        val networkIds = SimulationCache.getNetworkIds(runId)
+    // Network ids come from the persisted frames (`network_frames.run_id`, #124), not from
+    // SimulationCache: the cache may no longer hold the run (retention, memory budget, restart)
+    // while its frames still exist. Results are added only when still cached.
+    private def replayFromDatabase(runId: Long, status: String): Unit = {
         Future {
+            val networkIds = DatabaseManager.getFrameNetworkIds(runId)
             for (networkId <- networkIds) {
                 outRef ! TextMessage(s"""{"event":"topology_ready","runId":"$runId","networkId":"$networkId"}""")
                 outRef ! TextMessage(s"""{"event":"network_started","runId":"$runId","networkId":"$networkId"}""")
@@ -151,7 +154,11 @@ class WsConnectionActor(outRef: ActorRef)(implicit mat: Materializer) extends Ac
                         s"""{"event":"network_converged","runId":"$runId","networkId":"$networkId","finalRound":${r.finalRound},"consensus":${r.consensus}}""")
                 }
             }
-            outRef ! TextMessage(s"""{"event":"run_completed","runId":"$runId"}""")
+            // A run that failed ends with the same `error` event live subscribers got (#124).
+            if (status == "error")
+                outRef ! TextMessage(Server.runErrorEventJson(runId, "The simulation ended with an error"))
+            else
+                outRef ! TextMessage(s"""{"event":"run_completed","runId":"$runId"}""")
         }
     }
 }

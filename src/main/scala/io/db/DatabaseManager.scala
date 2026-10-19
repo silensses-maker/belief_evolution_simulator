@@ -505,6 +505,28 @@ object DatabaseManager {
         }
     }
 
+    /**
+     * Sets `deactivated = true` (idempotent: an already deactivated row is still a success).
+     * `false` when the row does not exist or the update fails. Reactivation has no endpoint:
+     * an administrator sets `deactivated = false` in the database.
+     */
+    def deactivateUser(userId: Int): Boolean = {
+        val connection = getConnection
+        try {
+            val stmt = connection.prepareStatement(
+                "UPDATE users SET deactivated = true, updated_at = CURRENT_TIMESTAMP WHERE id = ?"
+            )
+            stmt.setInt(1, userId)
+            stmt.executeUpdate() > 0
+        } catch {
+            case ex: Exception =>
+                Logger.logError(s"Error deactivating user $userId: ${ex.getMessage}")
+                false
+        } finally {
+            connection.close()
+        }
+    }
+
     def addUserRole(firebaseUid: String, role: String): Boolean = {
         val connection = getConnection
         try {
@@ -1543,22 +1565,29 @@ object DatabaseManager {
         }
     }
 
+    /**
+     * Sets a run's status. Terminal statuses (`completed`, `cancelled`, `error`) also bump
+     * completed_at, so the ephemeral-frames cron has a deletion anchor, and are FINAL (#124): they
+     * only apply while the row is still `running`, so neither a late `completed` nor a DELETE can
+     * overwrite another terminal status. Returns true when a row was updated — for a terminal
+     * status, false means the run does not exist or had already finished.
+     */
     def setRunStatus(runId: Long, status: String): Boolean = {
         if (GlobalState.APP_MODE.skipDatabase) return false
         val conn = getConnection
-        // Terminal statuses also bump completed_at so the ephemeral-frames cron has a deletion anchor.
         val terminal = status == "completed" || status == "cancelled" || status == "error"
         val completedClause = if (terminal) ", completed_at = NOW()" else ""
+        val runningGuard    = if (terminal) " AND status = 'running'" else ""
         try {
             val updateGenerated = conn.prepareStatement(
-                s"UPDATE generated_runs SET status = ?::run_status$completedClause WHERE id = ?"
+                s"UPDATE generated_runs SET status = ?::run_status$completedClause WHERE id = ?$runningGuard"
             )
             updateGenerated.setString(1, status)
             updateGenerated.setLong(2, runId)
             val genRows = updateGenerated.executeUpdate()
 
             val updateCustom = conn.prepareStatement(
-                s"UPDATE custom_runs SET status = ?::run_status$completedClause WHERE id = ?"
+                s"UPDATE custom_runs SET status = ?::run_status$completedClause WHERE id = ?$runningGuard"
             )
             updateCustom.setString(1, status)
             updateCustom.setLong(2, runId)
@@ -1632,6 +1661,34 @@ object DatabaseManager {
         }
     }
 
+    // Network ids that have persisted frames for a run, sorted (same order as
+    // SimulationCache.getNetworkIds). Fallback of GET /simulations/{runId}/networks and source of
+    // the WS DB replay when the in-memory cache no longer holds the run (#124). Uses
+    // network_frames_run_idx.
+    def getFrameNetworkIds(runId: Long): Seq[String] = {
+        if (GlobalState.APP_MODE.skipDatabase) return Seq.empty
+        val conn = getConnection
+        var stmt: PreparedStatement = null
+        try {
+            stmt = conn.prepareStatement(
+                "SELECT DISTINCT network_id FROM public.network_frames WHERE run_id = ? ORDER BY network_id"
+            )
+            stmt.setLong(1, runId)
+            val rs = stmt.executeQuery()
+            val ids = ArrayBuffer[String]()
+            // uuid::text is the canonical lowercase form, identical to java.util.UUID.toString.
+            while (rs.next()) ids += rs.getString(1)
+            ids.toSeq
+        } catch {
+            case ex: Exception =>
+                Logger.logError(s"getFrameNetworkIds($runId) failed: ${ex.getMessage}")
+                Seq.empty
+        } finally {
+            if (stmt != null) stmt.close()
+            conn.close()
+        }
+    }
+
     def getLastFrameRound(networkId: UUID): Option[Int] = {
         if (GlobalState.APP_MODE.skipDatabase) return None
         val conn = getConnection
@@ -1685,8 +1742,35 @@ object DatabaseManager {
         }
     }
 
-    // Deletes frames for ephemeral runs whose terminal state is older than `graceMinutes`.
-    // Returns the number of rows deleted. Run periodically from the Server cron.
+    // Startup reconciliation (#124): rows still 'running' belong to a previous process (a restart
+    // kills every run in memory). They are set to 'error' with completed_at = NOW(), which also
+    // makes their ephemeral frames eligible for cleanupEphemeralFrames. Must run before the
+    // server accepts new runs. Assumes a single backend process per database. Returns the number
+    // of runs reconciled.
+    def reconcileOrphanedRuns(): Int = {
+        if (GlobalState.APP_MODE.skipDatabase) return 0
+        val conn = getConnection
+        var stmt: Statement = null
+        try {
+            stmt = conn.createStatement()
+            val generated = stmt.executeUpdate(
+                "UPDATE public.generated_runs SET status = 'error', completed_at = NOW() WHERE status = 'running'")
+            val custom = stmt.executeUpdate(
+                "UPDATE public.custom_runs SET status = 'error', completed_at = NOW() WHERE status = 'running'")
+            generated + custom
+        } catch {
+            case ex: Exception =>
+                Logger.logError(s"reconcileOrphanedRuns failed: ${ex.getMessage}")
+                0
+        } finally {
+            if (stmt != null) stmt.close()
+            conn.close()
+        }
+    }
+
+    // Deletes frames for ephemeral runs whose terminal state is older than `graceMinutes`
+    // (Server.EphemeralFramesGraceMinutes). Returns the number of rows deleted. Run periodically
+    // from the Server cron (every Server.EphemeralFramesCleanupPeriodMinutes).
     def cleanupEphemeralFrames(graceMinutes: Int): Int = {
         if (GlobalState.APP_MODE.skipDatabase) return 0
         val conn = getConnection

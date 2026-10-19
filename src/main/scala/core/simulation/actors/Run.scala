@@ -1,6 +1,6 @@
 package core.simulation.actors
 
-import akka.actor.{Actor, ActorRef, PoisonPill, Props}
+import akka.actor.{Actor, ActorRef, OneForOneStrategy, PoisonPill, Props, SupervisorStrategy, Terminated}
 import core.model.agent.behavior.bias.CognitiveBiases.Bias
 import core.model.agent.behavior.silence.SilenceEffects.SilenceEffect
 import core.model.agent.behavior.silence.SilenceStrategies.SilenceStrategy
@@ -95,6 +95,14 @@ class Run extends Actor {
     var networksBuilt = 0
     var numberOfNetworksFinished = 0
     
+    // Lifecycle only (#124): this actor stops itself once it has reported RunComplete AND every
+    // Network it created has terminated (each one is watched), so a finished run no longer keeps
+    // its actor, metadata, results, timers and BuildMessage (a custom run's whole CustomRunInfo)
+    // alive for the life of the process. Waiting for the networks (instead of being stopped right
+    // at RunComplete) keeps their own shutdown exactly as before: they are not cut short.
+    var liveNetworks = 0
+    var reportedComplete = false
+    
     //
     var runMetadata: RunMetadata = null
     
@@ -115,19 +123,14 @@ class Run extends Actor {
         this.runMetadata = runMetadata
         this.agentTypeCount = agentTypeCount
         globalTimers.start("Building")
-        val networkId: UUID = uuids.v7()
-        val network = context.actorOf(
-            Props(new Network(networkId, runMetadata, agentTypeCount, null)) // customRunInfo.networkName
-        )
-        if (runMetadata.saveMode.includesNetworks) {
-            DatabaseManager.createNetwork(networkId, customRunInfo.networkName, runMetadata.runID, 
-                runMetadata.agentsPerNetwork)
-        }
-        networks = Array(network)
+        // Lifecycle only (#124): no Network is created here any more. An unnamed one ($a) used to
+        // be created (plus a `networks` DB row under its id when the save mode includes networks)
+        // and never used nor stopped: the real network is N1, created by buildNetwork(0) below
+        // through calculateBatches(), which also records N1's id and sends it BuildMessage.
+        networks = Array.fill[ActorRef](1)(null)
         BuildMessage = BuildCustomNetwork(customRunInfo)
         networkRunTimes = Array.fill[Long](1)(-1L)
         networkBuildTimes = Array.fill[Long](1)(-1L)
-        buildingTimers.start(network.path.name)
         calculateBatches()
     }
     
@@ -164,6 +167,13 @@ class Run extends Actor {
         networks = Array.fill[ActorRef](runMetadata.numberOfNetworks)(null)
         networkRunTimes = Array.fill[Long](runMetadata.numberOfNetworks)(-1L)
         networkBuildTimes = Array.fill[Long](runMetadata.numberOfNetworks)(-1L)
+    }
+    
+    // Lifecycle only (#124): a failed Network is never restarted (the new instance would wait
+    // forever for its build message); the failure is escalated so the Monitor stops this run and
+    // ends it in status 'error'.
+    override val supervisorStrategy: SupervisorStrategy = OneForOneStrategy() {
+        case _ => SupervisorStrategy.Escalate
     }
     
     // Message handling
@@ -286,11 +296,27 @@ class Run extends Actor {
                     )
                 }
                 context.parent ! RunComplete
+                reportedComplete = true
             }
             
             // Clean up network agents
             network ! PoisonPill
             
+        // A watched Network terminated. The last network's Terminated always arrives after its
+        // RunningComplete (it is sent before the network stops), so the final check happens here.
+        case Terminated(_) =>
+            liveNetworks -= 1
+            if (reportedComplete && liveNetworks == 0) context.stop(self)
+            
+    }
+    
+    // Every way this actor ends goes through here: completed (self-stop above), cancelled
+    // (PoisonPill from the Monitor) and failed (stopped by the Monitor's supervisor). Its Network /
+    // AgentProcessor children are stopped before this runs.
+    override def postStop(): Unit = {
+        val runId = if (runMetadata != null) runMetadata.runID.toString else "?"
+        val reason = if (reportedComplete) "completed" else "cancelled or failed"
+        Logger.log(s"Run $runId actor ${self.path.name} stopped ($reason)")
     }
     
     // ToDo coordinate for global agent limit
@@ -324,6 +350,8 @@ class Run extends Actor {
             agentTypeCount,
             agentBiases
             )), s"N${index + 1}")
+        context.watch(networks(index))
+        liveNetworks += 1
         if (runMetadata.saveMode.includesNetworks) {
             DatabaseManager.createNetwork(networkId, s"N${index + 1}", runMetadata.runID,
                                           runMetadata.agentsPerNetwork)

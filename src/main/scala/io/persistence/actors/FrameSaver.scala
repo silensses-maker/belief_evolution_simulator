@@ -22,8 +22,12 @@ case class FlushDone(runId: Long)
 object FrameSaverRouter {
     @volatile private var saver: ActorRef = null
 
+    // Called from the Monitor constructor, also when the Monitor is restarted (#124): Akka stops the
+    // previous incarnation's FrameSaver before the new constructor runs, so the saver is always
+    // recreated — keeping the old (dead) ref would drop every frame and never answer FlushNow, so
+    // runs would never emit `run_completed`.
     def init(context: ActorContext): Unit = {
-        if (saver == null) saver = context.actorOf(Props(new FrameSaver), "FrameSaver")
+        saver = context.actorOf(Props(new FrameSaver), "FrameSaver")
     }
 
     def getRoute: ActorRef = saver
