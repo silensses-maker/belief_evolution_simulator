@@ -1,6 +1,6 @@
 package io.web.json
 
-import io.db.DatabaseManager.{RunSummary, UsageLimits, UserData}
+import io.db.DatabaseManager.{GeneratedRunConfig, RunSummary, UsageLimits, UserData}
 import io.web.{ResultsSnapshot, TopologySnapshot}
 import io.web.auth.AuthenticatedUser
 import spray.json.*
@@ -145,7 +145,11 @@ object ApiJson {
         obj(members*)
     }
 
-    /** `GET /simulations/{runId}` and the items of the run lists. */
+    /**
+     * `GET /simulations/{runId}` and the items of the run lists. `seed` (#127, appended last so the
+     * older members keep their order) is the user seed of a generated run as a decimal string —
+     * a 64-bit seed can exceed JavaScript's safe integers, like the ids — and null for custom runs.
+     */
     def runSummary(run: RunSummary): JsObject = obj(
         "id"             -> jsId(run.id),
         "type"           -> jsNullable(run.runType),
@@ -154,7 +158,32 @@ object ApiJson {
         "iterationLimit" -> JsNumber(run.iterationLimit),
         "stopThreshold"  -> jsFloat(run.stopThreshold),
         "createdAt"      -> jsNullable(run.createdAt),
-        "status"         -> jsNullable(run.status)
+        "status"         -> jsNullable(run.status),
+        "seed"           -> run.seed.fold[JsValue](JsNull)(seed => JsString(seed.toString))
+    )
+
+    /**
+     * `GET /simulations/{runId}/config` (#127): the stored configuration of a generated run, with the
+     * request's member names (`agentTypes`, `biasTypes`) so a client can rebuild the request.
+     * `effectiveDensity` is the density the run used (after the role's densityFactor), not the one
+     * requested; `seed` is a decimal string like in the run summary.
+     */
+    def generatedRunConfig(config: GeneratedRunConfig): JsObject = obj(
+        "runId"            -> jsId(config.id),
+        "type"             -> JsString("generated"),
+        "numberOfNetworks" -> JsNumber(config.numberOfNetworks),
+        "agentsPerNetwork" -> JsNumber(config.agentsPerNetwork),
+        "effectiveDensity" -> JsNumber(config.effectiveDensity),
+        "iterationLimit"   -> JsNumber(config.iterationLimit),
+        "stopThreshold"    -> jsFloat(config.stopThreshold),
+        "seed"             -> JsString(config.seed.toString),
+        "frameRetention"   -> jsNullable(config.frameRetention),
+        "agentTypes"       -> JsArray(config.agentTypes.map { case (strategy, effect, count) =>
+            obj("silenceStrategy" -> JsNumber(strategy), "silenceEffect" -> JsNumber(effect), "count" -> JsNumber(count))
+        }),
+        "biasTypes"        -> JsArray(config.biasTypes.map { case (bias, count) =>
+            obj("biasType" -> JsNumber(bias), "count" -> JsNumber(count))
+        })
     )
 
     /** `GET /simulations/mine` and `GET /simulations` (admin). */

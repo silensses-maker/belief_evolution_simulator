@@ -341,6 +341,23 @@ components:
             keeps answering after reconnects. Only with `APP_SKIP_DATABASE=true` is no row written;
             then `404 Not Found` means "run no longer trackable" and status must be inferred from
             live WS events.
+        seed:
+          type: string
+          nullable: true
+          pattern: '^-?[0-9]+$'
+          example: '4503599627370496'
+          description: |
+            Seed of a **generated** run (#127): the `seed` of the request, or the one the server
+            drew (uniformly in `[0, 2^53 − 1]`) when it was null, omitted or `-1`
+            (`generated_runs.seed`). A decimal string because the column is a 64-bit integer (a
+            request may send any int64), like the ids. `null` for custom runs, which take no seed.
+            Same value in `GET /simulations/{runId}`, the run lists and `GET /simulations/{runId}/config`.
+
+            **Reproducibility:** sending this seed again with the same configuration rebuilds the
+            same networks and dynamics on the same server (the simulator's vectorised float
+            arithmetic depends on the CPU, so another server may differ slightly). Runs created
+            before #127 are the exception: their stored value is what the simulator received and
+            mixed with that run's id, so re-sending it starts a different run.
 
     SimCreated:
       type: object
@@ -367,6 +384,50 @@ components:
             Constant path of the persistent WebSocket endpoint.
             After receiving this response, send `{"type":"subscribe","runId":"<runId>"}` over the
             already-open WS connection (see `GET /ws`).
+
+    GeneratedRunConfig:
+      type: object
+      description: |
+        Stored configuration of a generated run (#127), to re-launch it: the request's fields as
+        the database keeps them. The requested `density` is NOT stored — `effectiveDensity` is the
+        Barabási–Albert m the run used (`clamp(floor(density × densityFactor), 1, agentsPerNetwork − 1)`).
+        A client that sends the request again needs a `density` that yields the same
+        `effectiveDensity` under its role's `densityFactor`. `persistFrames` is not stored.
+      properties:
+        runId:
+          type: string
+        type:
+          type: string
+          enum: [generated]
+        numberOfNetworks:
+          type: integer
+        agentsPerNetwork:
+          type: integer
+          description: Sum of `agentTypes[].count`.
+        effectiveDensity:
+          type: integer
+        iterationLimit:
+          type: integer
+        stopThreshold:
+          type: number
+          format: float
+        seed:
+          type: string
+          pattern: '^-?[0-9]+$'
+          description: Same value as the run summary's `seed` (decimal string).
+        frameRetention:
+          type: string
+          enum: [ephemeral, persistent]
+        agentTypes:
+          type: array
+          description: One row per (silenceStrategy, silenceEffect), sorted by code.
+          items:
+            $ref: '#/components/schemas/AgentType'
+        biasTypes:
+          type: array
+          description: One row per biasType, sorted by code.
+          items:
+            $ref: '#/components/schemas/BiasType'
 
     AgentType:
       type: object
@@ -430,7 +491,13 @@ components:
           type: integer
           format: int64
           nullable: true
-          description: RNG seed. null or omit for random.
+          description: |
+            RNG seed. `null`, omitted or `-1`: the server draws one uniformly in `[0, 2^53 − 1]`
+            (exact as a JavaScript number) and returns it as the run summary's `seed`. The same
+            seed with the same configuration replays the run's networks and dynamics (#127): the
+            server compensates the run id the simulator mixes into its random streams. Agent-type
+            rows are merged by (silenceStrategy, silenceEffect) and sorted by code before the
+            simulator assigns them to agents, so their order in the request does not matter.
         saveMode:
           type: integer
           description: Required but currently ignored — every run is saved in DEBUG mode (#133).
@@ -1075,6 +1142,46 @@ paths:
                 message: Run already finished
         '500':
           description: "`internal_error` — the status could not be updated; the run was not cancelled."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /simulations/{runId}/config:
+    get:
+      tags: [Simulations]
+      summary: Stored configuration of a generated run
+      description: |
+        The configuration a generated run was created with, as stored (#127), so a client can
+        re-launch it (the frontend pre-fills its wizard; nothing is started). Owner or
+        Administrator only. Custom runs answer `404`: they are re-launched from their exported
+        configuration file, and their networks are not rebuilt from the database.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: Stored configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeneratedRunConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: |
+            Run not found, a custom run, or a generated run whose distribution rows are missing
+            (`not_found`).
           content:
             application/json:
               schema:
