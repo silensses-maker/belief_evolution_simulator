@@ -130,6 +130,18 @@ class ApiJsonSuite extends munit.FunSuite {
         iterationLimit = 1000, stopThreshold = stopThreshold, createdAt = "2026-10-19T12:34:56Z",
         userId = Some(3), status = "completed")
 
+    private def generatedRunSummary(seed: Long) = new DatabaseManager.RunSummary(
+        id = 7_123_456_789_012_345_679L, runType = "generated", name = None, networkCount = 4,
+        iterationLimit = 500, stopThreshold = 0.01f, createdAt = "2026-10-19T12:35:00Z",
+        userId = Some(3), status = "running", seed = Some(seed))
+
+    /** 2^53 + 1: the first seed a JSON number would round in JavaScript. */
+    private val GeneratedSeedSample = 9_007_199_254_740_993L
+
+    /** The members of a run summary before #127 added `seed`. */
+    private val legacyRunSummaryMembers =
+        List("id", "type", "name", "networkCount", "iterationLimit", "stopThreshold", "createdAt", "status")
+
     // ── Number formats ──────────────────────────────────────────────────────────────────────────
 
     test("jsFloat keeps the digits of Float.toString (what the interpolation printed)") {
@@ -258,12 +270,85 @@ class ApiJsonSuite extends munit.FunSuite {
         }
         // The legacy body was invalid JSON for such a name...
         assert(scala.util.Try(legacyRunSummaryJson(runSummary(Some("a \"b\" c"))).parseJson).isFailure)
-        // ... and for plain names the values are the same (it was pretty-printed, now compact).
+        // ... and for plain names the values are the same (it was pretty-printed, now compact);
+        // #127 only appended `seed` after them.
         List(Some("my run"), None).foreach { name =>
-            assertEquals(ApiJson.runSummary(runSummary(name)).compactPrint.parseJson,
-                legacyRunSummaryJson(runSummary(name)).parseJson)
+            val members = ApiJson.runSummary(runSummary(name)).compactPrint.parseJson.asJsObject.fields
+            assertEquals(JsObject(members - "seed"), legacyRunSummaryJson(runSummary(name)).parseJson)
         }
         assertEquals(field(ApiJson.runSummary(runSummary(None)), "name"), JsNull)
+    }
+
+    test("runSummary: seed is appended last, a decimal string for generated runs, null for custom (#127)") {
+        // Member order of the built object (ApiJson.obj keeps it; a parsed object may not).
+        assertEquals(memberNames(ApiJson.runSummary(generatedRunSummary(42L))), legacyRunSummaryMembers :+ "seed")
+        assertEquals(memberNames(ApiJson.runSummary(runSummary(None))), legacyRunSummaryMembers :+ "seed")
+
+        val generatedJson = ApiJson.runSummary(generatedRunSummary(42L)).compactPrint
+        assert(generatedJson.endsWith(""","status":"running","seed":"42"}"""), generatedJson)
+        val generated = parseAsClient(generatedJson)
+        assertEquals(field(generated, "seed"), JsString("42"))
+        assertEquals(str(generated, "type"), "generated")
+
+        val custom = parseAsClient(ApiJson.runSummary(runSummary(Some("Red"))).compactPrint)
+        assertEquals(field(custom, "seed"), JsNull)
+    }
+
+    test("runSummary: 64-bit seeds round-trip exactly as strings (beyond 2^53, negative, bounds)") {
+        // Auto seeds are currentTimeMillis ^ nanoTime: past ~104 days of host uptime they exceed
+        // 2^53, which a JSON number would round in JavaScript.
+        val seeds = List(0L, 1L, -1L, (1L << 53) + 1, 1_730_000_000_123_456_789L, Long.MaxValue, Long.MinValue)
+        seeds.foreach { seed =>
+            val json   = ApiJson.runSummary(generatedRunSummary(seed)).compactPrint
+            val parsed = parseAsClient(json)
+            assertEquals(str(parsed, "seed"), seed.toString)
+            assertEquals(str(parsed, "seed").toLong, seed)
+            assert(json.endsWith(s""","seed":"$seed"}"""), json)
+        }
+    }
+
+    private def generatedConfig(seed: Long, frameRetention: String = "ephemeral") = new DatabaseManager.GeneratedRunConfig(
+        id = 7_123_456_789_012_345_679L, userId = Some(3), seed = seed, effectiveDensity = 3,
+        iterationLimit = 500, numberOfNetworks = 4, agentsPerNetwork = 10, stopThreshold = 0.001f,
+        frameRetention = frameRetention,
+        agentTypes = Vector((0, 0, 8), (3, 2, 2)),
+        biasTypes = Vector((0, 30), (2, 18)))
+
+    test("generatedRunConfig: request member names, exact seed string, rows in order (#127)") {
+        val json = ApiJson.generatedRunConfig(generatedConfig(GeneratedSeedSample)).compactPrint
+        assertEquals(json,
+            """{"runId":"7123456789012345679","type":"generated","numberOfNetworks":4,"agentsPerNetwork":10,""" +
+            """"effectiveDensity":3,"iterationLimit":500,"stopThreshold":0.001,"seed":"9007199254740993",""" +
+            """"frameRetention":"ephemeral","agentTypes":[{"silenceStrategy":0,"silenceEffect":0,"count":8},""" +
+            """{"silenceStrategy":3,"silenceEffect":2,"count":2}],"biasTypes":[{"biasType":0,"count":30},""" +
+            """{"biasType":2,"count":18}]}""")
+        val parsed = parseAsClient(json)
+        assertEquals(str(parsed, "seed"), "9007199254740993")
+        assertEquals(array(parsed, "agentTypes").map(r => int(r, "count")), Vector(8, 2))
+        assertEquals(array(parsed, "biasTypes").map(r => int(r, "biasType")), Vector(0, 2))
+    }
+
+    test("generatedRunConfig: 64-bit seeds round-trip as strings; string members are escaped") {
+        List(0L, -1L, Long.MaxValue, Long.MinValue, GeneratedSeedSample).foreach { seed =>
+            assertEquals(str(parseAsClient(ApiJson.generatedRunConfig(generatedConfig(seed)).compactPrint), "seed").toLong, seed)
+        }
+        nastyStrings.foreach { s =>
+            val parsed = parseAsClient(ApiJson.generatedRunConfig(generatedConfig(1L, s)).compactPrint)
+            assertEquals(str(parsed, "frameRetention"), s)
+        }
+        val empty = generatedConfig(1L).copy(agentTypes = Vector.empty, biasTypes = Vector.empty)
+        val parsed = parseAsClient(ApiJson.generatedRunConfig(empty).compactPrint)
+        assertEquals(array(parsed, "agentTypes"), Vector.empty)
+        assertEquals(array(parsed, "biasTypes"), Vector.empty)
+    }
+
+    test("runList: seeds of generated and custom runs next to hostile names") {
+        val runs = nastyStrings.map(s => runSummary(Some(s))) :+ generatedRunSummary(Long.MinValue)
+        val parsed = array(parseAsClient(ApiJson.runList(runs, 20, 0).compactPrint), "runs")
+        assertEquals(parsed.init.map(r => str(r, "name")), nastyStrings.toVector)
+        assertEquals(parsed.init.map(r => field(r, "seed")).distinct, Vector(JsNull))
+        assertEquals(str(parsed.last, "seed"), "-9223372036854775808")
+        assertEquals(field(parsed.last, "name"), JsNull)
     }
 
     test("runList / runCancelled / networkList: round trips and old bytes") {

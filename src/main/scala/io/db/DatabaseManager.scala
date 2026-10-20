@@ -20,6 +20,8 @@ import java.sql.{Connection, PreparedStatement, Statement}
 import java.util.UUID
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.mutable
+// The build imports jdk.incubator.vector.* everywhere (-Yimports): use Scala's Vector here.
+import scala.collection.immutable.Vector
 
 object DatabaseManager {
     // ============================================================================
@@ -138,8 +140,11 @@ object DatabaseManager {
      * 3. <code>cognitive_bias_distributions</code> - how many agents exhibit each type of cognitive bias
      *
      * @param id                         Unique identifier for this simulation run (typically a Snowflake ID)
-     * @param seed                       Random seed used for procedural generation (for reproducibility)
-     * @param density                    Network density parameter controlling connection probability between agents
+     * @param seed                       The run's USER seed (requested or drawn). Since #127 the simulator
+     *                                   receives `seed − id` (io.web.GeneratedRunInputs.engineSeed), so
+     *                                   this value replays the run; rows written before #127 store the
+     *                                   value the simulator received instead
+     * @param density                    EFFECTIVE density (Barabási–Albert `m` after the role's densityFactor)
      * @param iterationLimit             Maximum number of simulation iterations before forced termination
      * @param totalNetworks              Number of separate networks to generate in this run
      * @param agentsPerNetwork           Number of agents in each network (calculated from agent type counts)
@@ -1413,6 +1418,14 @@ object DatabaseManager {
         java.time.Instant.ofEpochMilli(ms).toString
     }
 
+    /**
+     * One row of `generated_runs` / `custom_runs` as the run endpoints expose it.
+     * `seed` (#127) is `generated_runs.seed`: the USER seed of a generated run (the one requested,
+     * or the one the server drew when none was); None for custom runs, which take none. Since #127
+     * the simulator receives `seed − id` (GeneratedRunInputs.engineSeed), so the same seed replays
+     * the run. Rows written BEFORE #127 hold the value the simulator itself received, which it
+     * mixed with that run's id: re-sending it does not replay those runs.
+     */
     case class RunSummary(
         id: Long,
         runType: String,
@@ -1422,8 +1435,15 @@ object DatabaseManager {
         stopThreshold: Float,
         createdAt: String,
         userId: Option[Int],
-        status: String
+        status: String,
+        seed: Option[Long] = None
     )
+
+    /** A nullable bigint column of the current row (`getLong` reads SQL NULL as 0). */
+    private def optionalLong(rs: java.sql.ResultSet, column: String): Option[Long] = {
+        val value = rs.getLong(column)
+        if (rs.wasNull()) None else Some(value)
+    }
 
     private def queryRuns(userClause: String, limit: Int, offset: Int, params: Seq[Any]): Seq[RunSummary] = {
         val conn = getConnection
@@ -1431,11 +1451,13 @@ object DatabaseManager {
             val sql =
                 s"""
                    |SELECT id, 'generated' AS run_type, NULL AS name,
-                   |       total_networks AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status
+                   |       total_networks AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status,
+                   |       seed
                    |FROM generated_runs $userClause
                    |UNION ALL
                    |SELECT id, 'custom' AS run_type, run_name AS name,
-                   |       1 AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status
+                   |       1 AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status,
+                   |       NULL::bigint AS seed
                    |FROM custom_runs $userClause
                    |ORDER BY id DESC
                    |LIMIT ? OFFSET ?
@@ -1465,7 +1487,8 @@ object DatabaseManager {
                     stopThreshold  = rs.getFloat("stop_threshold"),
                     createdAt    = snowflakeToIso(rs.getLong("id")),
                     userId       = Option(rs.getObject("user_id")).map(_.toString.toInt),
-                    status       = rs.getString("status")
+                    status       = rs.getString("status"),
+                    seed         = optionalLong(rs, "seed")
                 )
             }
             buf.toSeq
@@ -1532,11 +1555,13 @@ object DatabaseManager {
             val sql =
                 """
                   |SELECT id, 'generated' AS run_type, NULL AS name,
-                  |       total_networks AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status
+                  |       total_networks AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status,
+                  |       seed
                   |FROM generated_runs WHERE id = ?
                   |UNION ALL
                   |SELECT id, 'custom' AS run_type, run_name AS name,
-                  |       1 AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status
+                  |       1 AS network_count, iteration_limit, stop_threshold, user_id, status::text AS status,
+                  |       NULL::bigint AS seed
                   |FROM custom_runs WHERE id = ?
                   |LIMIT 1
                   |""".stripMargin
@@ -1553,12 +1578,97 @@ object DatabaseManager {
                 stopThreshold  = rs.getFloat("stop_threshold"),
                 createdAt      = snowflakeToIso(rs.getLong("id")),
                 userId         = Option(rs.getObject("user_id")).map(_.toString.toInt),
-                status         = rs.getString("status")
+                status         = rs.getString("status"),
+                seed           = optionalLong(rs, "seed")
             ))
             else None
         } catch {
             case ex: Exception =>
                 Logger.logError(s"getRunSummary failed: ${ex.getMessage}")
+                None
+        } finally {
+            conn.close()
+        }
+    }
+
+    /**
+     * Stored configuration of a generated run (#127), as `GET /simulations/{runId}/config` serves it
+     * to re-launch the run. `effectiveDensity` is `generated_runs.density`, i.e. the Barabási–Albert
+     * `m` after the role's densityFactor (the requested density is not stored). Agent-type and bias
+     * rows are sorted by code: the order executeGeneratedRun gives the simulator since #127.
+     */
+    case class GeneratedRunConfig(
+        id: Long,
+        userId: Option[Int],
+        seed: Long,
+        effectiveDensity: Int,
+        iterationLimit: Int,
+        numberOfNetworks: Int,
+        agentsPerNetwork: Int,
+        stopThreshold: Float,
+        frameRetention: String,
+        agentTypes: Vector[(Int, Int, Int)],
+        biasTypes: Vector[(Int, Int)]
+    )
+
+    /**
+     * None when the run is not a generated run, or its distribution rows are missing (it can then
+     * not be rebuilt), or the query fails (logged).
+     */
+    def getGeneratedRunConfig(runId: Long): Option[GeneratedRunConfig] = {
+        val conn = getConnection
+        try {
+            val runStmt = conn.prepareStatement(
+                """SELECT seed, density, iteration_limit, total_networks, agents_per_network, stop_threshold,
+                  |       frame_retention::text AS frame_retention, user_id
+                  |FROM generated_runs WHERE id = ?""".stripMargin)
+            runStmt.setLong(1, runId)
+            val run = runStmt.executeQuery()
+            if (!run.next()) None
+            else {
+                val typesStmt = conn.prepareStatement(
+                    "SELECT silence_strategy::text, silence_effect::text, count FROM agent_type_distributions WHERE run_id = ?")
+                typesStmt.setLong(1, runId)
+                val typesRs = typesStmt.executeQuery()
+                val types = Vector.newBuilder[(Int, Int, Int)]
+                while (typesRs.next()) types += ((
+                    SilenceStrategies.fromString(typesRs.getString(1)).toInt,
+                    SilenceEffects.fromString(typesRs.getString(2)).toInt,
+                    typesRs.getInt(3)
+                ))
+
+                val biasStmt = conn.prepareStatement(
+                    "SELECT cognitive_bias::text, count FROM cognitive_bias_distributions WHERE run_id = ?")
+                biasStmt.setLong(1, runId)
+                val biasRs = biasStmt.executeQuery()
+                val biases = Vector.newBuilder[(Int, Int)]
+                while (biasRs.next()) {
+                    val name = biasRs.getString(1)
+                    val code = CognitiveBiases.fromString(name).getOrElse(
+                        throw new IllegalStateException(s"Unknown cognitive_bias '$name'"))
+                    biases += ((code.toByte.toInt, biasRs.getInt(2)))
+                }
+
+                val agentTypes = types.result().sortBy { case (strategy, effect, _) => (strategy, effect) }
+                val biasTypes  = biases.result().sortBy(_._1)
+                if (agentTypes.isEmpty || biasTypes.isEmpty) None
+                else Some(GeneratedRunConfig(
+                    id               = runId,
+                    userId           = Option(run.getObject("user_id")).map(_.toString.toInt),
+                    seed             = run.getLong("seed"),
+                    effectiveDensity = run.getInt("density"),
+                    iterationLimit   = run.getInt("iteration_limit"),
+                    numberOfNetworks = run.getInt("total_networks"),
+                    agentsPerNetwork = run.getInt("agents_per_network"),
+                    stopThreshold    = run.getFloat("stop_threshold"),
+                    frameRetention   = run.getString("frame_retention"),
+                    agentTypes       = agentTypes,
+                    biasTypes        = biasTypes
+                ))
+            }
+        } catch {
+            case ex: Exception =>
+                Logger.logError(s"getGeneratedRunConfig failed: ${ex.getMessage}")
                 None
         } finally {
             conn.close()

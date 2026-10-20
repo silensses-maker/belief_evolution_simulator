@@ -512,10 +512,8 @@ object Server {
                                     case Left(resp) => complete(resp)
                                     case Right((agentsPerNetwork, effectiveDensity, retention)) =>
                                         val persistFrames = req.persistFrames.getOrElse(false)
-                                        val seed = req.seed.getOrElse(-1L) match {
-                                            case -1L => System.currentTimeMillis() ^ System.nanoTime()
-                                            case s   => s
-                                        }
+                                        // null, omitted or -1: drawn in [0, 2^53 - 1] (#127)
+                                        val seed = GeneratedRunInputs.resolveSeed(req.seed)
                                         val agentTypesArr = req.agentTypes.map { a =>
                                             (SilenceStrategies.fromByte(a.silenceStrategy.toByte),
                                              SilenceEffects.fromByte(a.silenceEffect.toByte),
@@ -665,6 +663,31 @@ object Server {
                                         } else {
                                             complete(StatusCodes.Conflict ->
                                                 errorJson("conflict", "Run already finished"))
+                                        }
+                                }
+                            }
+                        }
+                    } ~
+                    // GET /simulations/{runId}/config — stored configuration of a generated run, to
+                    // re-launch it (#127). Custom runs: 404 (they are re-launched from their exported
+                    // configuration file; their networks are not rebuilt from the database).
+                    path("config") {
+                        get {
+                            authenticate { authUser =>
+                                DatabaseManager.getRunSummary(runId) match {
+                                    case None => complete(StatusCodes.NotFound ->
+                                        errorJson("not_found", "Run not found"))
+                                    case Some(run) if !run.userId.contains(authUser.dbUserId) && !authUser.isAdmin =>
+                                        complete(StatusCodes.Forbidden ->
+                                            errorJson("forbidden", "Access denied"))
+                                    case Some(run) if run.runType != "generated" =>
+                                        complete(StatusCodes.NotFound -> errorJson("not_found",
+                                            "Only generated runs have a stored configuration; re-launch a custom run from its exported configuration file"))
+                                    case Some(_) =>
+                                        DatabaseManager.getGeneratedRunConfig(runId) match {
+                                            case None => complete(StatusCodes.NotFound ->
+                                                errorJson("not_found", "The stored configuration of this run is incomplete"))
+                                            case Some(config) => complete(jsonOk(ApiJson.generatedRunConfig(config)))
                                         }
                                 }
                             }
@@ -1071,17 +1094,36 @@ object Server {
             }
         }
 
+    /**
+     * Persists and starts a generated run. `seed` is the run's USER seed (requested or drawn, see
+     * GeneratedRunInputs.resolveSeed): it is what `generated_runs.seed` stores and the API returns,
+     * while the simulator receives `GeneratedRunInputs.engineSeed(seed, runID)`, so the same
+     * configuration and seed rebuild the same networks and dynamics on every launch (#127).
+     * Agent-type and bias rows are put in canonical order first (see GeneratedRunInputs), so the
+     * stored rows rebuild exactly what the simulator received.
+     */
     private def executeGeneratedRun(
         seed: Long, saveMode: Byte, numberOfNetworks: Int, density: Int,
         iterationLimit: Int, stopThreshold: Float,
-        agentTypes: Array[(SilenceStrategy, SilenceEffect, Int)],
-        biases: Array[(Bias, Int)],
+        requestedAgentTypes: Array[(SilenceStrategy, SilenceEffect, Int)],
+        requestedBiases: Array[(Bias, Int)],
         agentsPerNetwork: Int,
         confidenceParams: mutable.Map[Int, (Float, Float)] = mutable.Map(),
         userId: Option[Int] = None,
         persistFrames: Boolean = false,
         frameRetention: String = "ephemeral"
     ): Long = {
+        val agentTypes: Array[(SilenceStrategy, SilenceEffect, Int)] =
+            GeneratedRunInputs.canonicalAgentTypes(
+                requestedAgentTypes.toSeq.map { case (strategy, effect, count) => (strategy.toInt, effect.toInt, count) }
+            ).map { case (strategy, effect, count) =>
+                (SilenceStrategies.fromByte(strategy.toByte), SilenceEffects.fromByte(effect.toByte), count)
+            }.toArray
+        val biases: Array[(Bias, Int)] =
+            GeneratedRunInputs.canonicalBiasTypes(
+                requestedBiases.toSeq.map { case (bias, count) => (bias.toByte.toInt, count) }
+            ).map { case (bias, count) => (CognitiveBiases.fromByte(bias.toByte), count) }.toArray
+
         var runID = SnowflakeID.generateId()
         // Save mode forced to DEBUG BY DESIGN in this phase (#133): while APP_LEGACY_DB=false any
         // requested saveMode becomes DEBUG, so no per-agent data is written. Only the run row
@@ -1119,10 +1161,11 @@ object Server {
         }
 
         SimulationCache.registerRun(runID, persistent = frameRetention == "persistent")
+        // After the legacy-DB branch above, which may replace runID: the engine adds THIS id back.
         monitor.get ! AddNetworks(
             runID, agentTypes, biases, confidenceParams,
             Uniform, convertedSaveMode, numberOfNetworks, density,
-            iterationLimit, seed, 2.5f, stopThreshold,
+            iterationLimit, GeneratedRunInputs.engineSeed(seed, runID), 2.5f, stopThreshold,
             persistFrames
         )
 
@@ -1138,11 +1181,8 @@ object Server {
         val density = bytesToInt(data, 8)
         val iterationLimit = bytesToInt(data, 12)
         val stopThreshold = bytesToFloat(data, 16)
-        val seed: Long = if (bytesToLong(data, 20) == -1) {
-            System.currentTimeMillis() ^ System.nanoTime()
-        } else {
-            bytesToLong(data, 20)
-        }
+        // -1: drawn in [0, 2^53 - 1], same seed path as POST /simulations/generated (#127)
+        val seed: Long = GeneratedRunInputs.resolveSeed(Some(bytesToLong(data, 20)))
 
         val agentTypes = new Array[(SilenceStrategy, SilenceEffect, Int)](agentTypeCount)
         val confidenceParams: mutable.Map[Int, (Float, Float)] = mutable.Map()
