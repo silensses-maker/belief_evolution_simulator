@@ -232,6 +232,34 @@ ORDER BY last_call DESC;
 
 **`APP_ENABLE_LEGACY_ROUTES=true` (dev/test only).** Restores the old routes unchanged (anonymous, no usage limits, `/run` without bounds checks, `Deprecation`/`Sunset` headers). It exists only to start a run in a throwaway local container without a Firebase token. **Never enable it in production**: `docker-compose.prod.yml` pins it to `false`, and the backend logs a `WARNING` at startup whenever it is on.
 
+### Polarization measures (#129)
+
+The frontend's Polarization chart is computed here, by the real Python package [pol_measures](https://github.com/Ulvenforst/pol_measures) (PROMUEVA; package `measures`, by Juan Camilo Narváez Tascón, BiPol by Carlos Pinzón; MEC paper arXiv:2606.13997), installed in the backend image at a pinned commit (pol_measures is GPL-3.0, installed unmodified from its public repository; used with its authors' permission). Nothing is reimplemented: `polarization/worker.py` only calls the package's public classes and reads its threshold tables.
+
+- `GET /simulations/polarization/measures` — catalog: every measure the package exports, its parameters with the package's defaults and ranges, the `k` it supports (Experts: 5 only), its level thresholds, the f(d) options of GeneralizedER / GeneralizedMEC (a named whitelist, never evaluated client input), the limits and the package / numpy / SciPy / Python versions. Cached in memory.
+- `POST /simulations/polarization` — `{measure, params, k, histograms: number[][]}` (one histogram of `k` counts or fractions per round, at most 20 000 per request, body at most 8 MiB) → `{values, levels, errors?, classification, unique, package: {ref, version}}`. Identical histograms are computed once. Errors: `400 invalid_body`, `422 invalid_measure`, `503 unavailable` (see `/docs`).
+
+Both are authenticated and mounted with and without `/api`. Inside the container one worker process (`/opt/polarization/venv/bin/python3 -I /app/polarization/worker.py`, JSON lines over stdin/stdout, a minimal environment without the backend's secrets) is started on the first request and reused; requests are computed one at a time, each within 30 s, and a worker that times out, crashes or answers garbage is killed and restarted (that request answers 503). Its stderr goes to the backend log. There is no extra service or container: production pulls the same image as always.
+
+**Settings** (all optional; the defaults are in code, `PolarizationSettings`):
+
+| Variable | Default | |
+|---|---|---|
+| `APP_POLARIZATION` | enabled | `false` disables the feature: both paths answer `404 not_found` (any method, no token needed) and Python is never started |
+| `APP_POLARIZATION_TIMEOUT_SECONDS` | `30` | per-request timeout of the worker (1–300) |
+| `APP_POLARIZATION_PYTHON` / `APP_POLARIZATION_WORKER` | the image's venv / `/app/polarization/worker.py` | only for running the backend outside Docker |
+
+The startup log has one line with the state and the pinned ref, e.g. `Polarization measures (#129): enabled, pol_measures @ 0e05564ed0b7b23de368dd19becac3a1de4ef745; ...`.
+
+**Self-test** (in the built image; checks catalog and compute against the package called directly, for uniform, consensus, two-pole and skewed histograms of every measure):
+
+```bash
+docker run --rm --entrypoint /opt/polarization/venv/bin/python3 silenssesmaker/bes-backend:latest \
+  -I /app/polarization/worker_selftest.py
+```
+
+**Bump the package** to another pol_measures commit: change `ARG POL_MEASURES_REF` at the top of the `Dockerfile` (the only place it is written; `POL_NUMPY_VERSION` / `POL_SCIPY_VERSION` pin numpy and SciPy next to it), build the image, run the self-test above, and check the catalog (`GET /simulations/polarization/measures`) for new measures or parameters: the worker exports whatever the package's `__all__` lists, but new parameter ranges, display names or the beta flag live in `polarization/worker.py` (`PARAM_RANGES`, `DISPLAY_NAMES`, `BETA_MEASURES`). The frontend's wiki names the commit too (`POL_MEASURES_SOURCE` in `front_BES/src/shared/lib/polarization/source.ts`).
+
 ---
 
 ## Running Simulations

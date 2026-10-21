@@ -1,6 +1,7 @@
 package io.web
 
-import akka.actor.{ActorRef, ActorSystem}
+import akka.Done
+import akka.actor.{ActorRef, ActorSystem, CoordinatedShutdown}
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.headers.*
 import akka.http.scaladsl.model.ws.{BinaryMessage, Message, TextMessage}
@@ -28,6 +29,7 @@ import io.web.auth.{FieldIssue, TokenVerifier}
 import io.web.auth.FirebaseAuthDirective.{authenticate, requireAdmin}
 import io.web.json.ApiJson
 import io.web.ws.WsEvents
+import io.web.polarization.{PolarizationRoutes, PolarizationService, PolarizationSettings}
 import utils.datastructures.SnowflakeID
 import utils.rng.distributions.Uniform
 import spray.json.*
@@ -410,6 +412,21 @@ object Server {
                 "Dev/test only, NEVER in production.")
         else
             Logger.log("Legacy endpoints /run, /custom, /neighbors: removed, they answer 410 Gone (#121)")
+
+        // Polarization measures (#129): the real pol_measures package, in a Python worker inside this
+        // image (polarization/worker.py), started on the first request. APP_POLARIZATION=false (default:
+        // enabled, in code) answers 404 and never starts Python. One startup line with the state and
+        // the pinned package ref; the worker is destroyed at shutdown.
+        val polarizationSettings = PolarizationSettings.fromEnv()
+        Logger.log(polarizationSettings.startupLine)
+        val polarizationService: Option[PolarizationService] =
+            Option.when(polarizationSettings.enabled)(PolarizationService(polarizationSettings))
+        polarizationService.foreach { service =>
+            CoordinatedShutdown(actorSystem).addTask(CoordinatedShutdown.PhaseServiceStop, "polarization-worker") { () =>
+                service.close()
+                scala.concurrent.Future.successful(Done)
+            }
+        }
 
         // Periodic cleanup every 60 seconds
         import scala.concurrent.duration.*
@@ -903,7 +920,13 @@ object Server {
             }
         }
         
-        val baseRoutes: Route = corsHandler ~ webSocketRoute ~ legacyRoute ~ userRoutes ~ simulationRoutes ~ docsRoute ~ homeRoute
+        // GET /simulations/polarization/measures, POST /simulations/polarization (#129)
+        val polarizationRoutes: Route = addCorsHeaders {
+            PolarizationRoutes(authenticate, polarizationService)
+        }
+
+        val baseRoutes: Route = corsHandler ~ webSocketRoute ~ legacyRoute ~ userRoutes ~ polarizationRoutes ~
+            simulationRoutes ~ docsRoute ~ homeRoute
         // Dual-mount: el reverse proxy del LIPN expone el backend bajo /api y
         // no controlamos si strippea el prefijo — aceptamos ambas formas
         // (/ws y /api/ws, /simulations y /api/simulations, etc.).
