@@ -564,7 +564,8 @@ class AgentProcessor(
                 }
             
             case bm: BiModal =>
-                val dist = new BimodalDistribution(bm.peak1, bm.peak2, bm.lower, bm.upper, bm.stdDev)
+                // the processor's seeded generator, as for the other distributions (reproducible runs)
+                val dist = new BimodalDistribution(bm.peak1, bm.peak2, bm.lower, bm.upper, bm.stdDev, random)
                 var i = startsAt
                 while (i < (startsAt + numberOfAgents)) {
                     belief(i) = dist.sampleFloat()

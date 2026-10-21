@@ -7,9 +7,9 @@ class BimodalDistribution(
     peak2: Double, 
     lower: Double = 0, 
     upper: Double = 1,
-    stdDev: Option[Double] = None
+    stdDev: Option[Double] = None,
+    random: Random = new Random() // pass a seeded generator for reproducible samples
 ) {
-  private val random = new Random()
   private val midpoint = (peak1 + peak2) / 2
   private val stdDev1 = stdDev.getOrElse((midpoint - lower) / 3)
   private val stdDev2 = stdDev.getOrElse((upper - midpoint) / 3)
