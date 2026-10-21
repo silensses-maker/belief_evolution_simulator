@@ -34,8 +34,10 @@ info:
     | 413 | `payload_too_large` | body above 64 MB (`akka.http.server.parsing.max-content-length`) |
     | 415 | `unsupported_media_type` | a `Content-Type` the endpoint does not read |
     | 422 | `usage_limit_exceeded` | role quota exceeded; adds `limit` and `requested` |
+    | 422 | `invalid_measure` | polarization: the measure, a parameter or `k` is rejected by pol_measures (`fields` names it) |
     | 500 | `internal_error` | unexpected failure; logged server-side, the body never carries exception details |
     | 503 | `request_timeout` | no answer within `akka.http.server.request-timeout` (60 s) |
+    | 503 | `unavailable` | polarization: the pol_measures worker is not available (could not start, crashed, timed out, busy); retry later |
 
     Authentication runs before the body is read: a malformed body sent with a missing or invalid
     token answers `401`, not `400`.
@@ -99,6 +101,17 @@ info:
     `<docs>; rel="service-doc"`. The request body is not read and no run is started. Use the
     authenticated `POST /simulations/generated` and `POST /simulations/custom` instead (the binary
     `application/octet-stream` variant of the latter takes the former `POST /custom` payload).
+
+    **Polarization measures (#129).** `GET /simulations/polarization/measures` and
+    `POST /simulations/polarization` compute polarization with the real Python package
+    [pol_measures](https://github.com/Ulvenforst/pol_measures) (package `measures`), pinned to a
+    commit in the backend image (`ARG POL_MEASURES_REF` of the Dockerfile; the answers carry the
+    installed commit). A worker process inside the backend container is started on the first
+    request and reused; requests are computed one at a time, each within 30 s
+    (`APP_POLARIZATION_TIMEOUT_SECONDS`), and a worker that times out or crashes is restarted
+    (that request answers `503 unavailable`). With `APP_POLARIZATION=false` (default: enabled)
+    both paths answer `404 not_found` to any method, before authentication, and Python is never
+    started.
 
 servers:
   # Relativo al origen de la página que sirve estos docs: en prod resuelve a
@@ -638,12 +651,289 @@ components:
             `ephemeral` deletes frames 60–90 minutes after the run leaves `running`. `persistent`
             keeps them indefinitely and is restricted to Administrators.
 
+    PolarizationParam:
+      type: object
+      description: |
+        A parameter of a measure, read from the class constructor (defaults are the package's).
+        `number`: a finite number in (`minExclusive`, `max`] (`null` bound = none; the package
+        enforces these: EstebanRay `0 < alpha <= 1.6`, the others `> 0`); `nullable` ones accept
+        `null` (= the package's default, e.g. EstebanRay's normalization `K`). `choice`: one of
+        `options` (the alienation function f(d) of GeneralizedER / GeneralizedMEC, a named
+        whitelist; see `alienations`).
+      required: [name, type, default]
+      properties:
+        name:
+          type: string
+          example: alpha
+        type:
+          type: string
+          enum: [number, choice]
+        default:
+          nullable: true
+          oneOf:
+            - type: number
+            - type: string
+          example: 0.8
+        nullable:
+          type: boolean
+          description: "`number` only."
+        minExclusive:
+          type: number
+          nullable: true
+          description: "`number` only."
+          example: 0
+        max:
+          type: number
+          nullable: true
+          description: "`number` only (inclusive)."
+          example: 1.6
+        options:
+          type: array
+          description: "`choice` only."
+          items:
+            type: string
+          example: ['d', 'd^2', 'd^3', 'd+d^2', 'd+2d^2', 'exp(d)-1', 'exp(2d)-1']
+
+    PolarizationClassification:
+      type: object
+      description: |
+        Level thresholds of pol_measures (`measures.thresholds`) for the run charts' scheme: method
+        `kmeans` (the package's default), 3 levels. A value below `thresholds[i]` is
+        `levels[i]`, otherwise the last level. Only defined when the parameters match a parameter
+        set the package calibrated (EstebanRay alpha = 0.8, MECNormalized alpha = 2 and
+        beta = 1.15, BiPol).
+      required: [method, paramSet, params, levels, thresholds]
+      properties:
+        method:
+          type: string
+          example: kmeans
+        paramSet:
+          type: string
+          example: default
+        params:
+          type: object
+          additionalProperties:
+            type: number
+          example: {alpha: 0.8}
+        levels:
+          type: array
+          items:
+            type: string
+          example: [low, medium, high]
+        thresholds:
+          type: array
+          items:
+            type: number
+          example: [0.3791, 0.5141]
+
+    PolarizationMeasure:
+      type: object
+      required: [id, name, kind, beta, params, categories, hasThresholds, classification]
+      properties:
+        id:
+          type: string
+          description: The package's class name (`measures.metrics.literature` / `.proposed` `__all__`).
+          example: EstebanRay
+        name:
+          type: string
+          example: Esteban–Ray
+        kind:
+          type: string
+          enum: [literature, proposed]
+        beta:
+          type: boolean
+          description: Still being developed upstream (MECNormalized, per the package README).
+        params:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolarizationParam'
+        categories:
+          type: array
+          description: The k in 2..10 the measure is defined for (Experts only 5; VanDerEijkPol from 3).
+          items:
+            type: integer
+          example: [2, 3, 4, 5, 6, 7, 8, 9, 10]
+        hasThresholds:
+          type: boolean
+          description: The package has thresholds for this measure (for some parameter set).
+        classification:
+          description: The thresholds that apply with the DEFAULT parameters, or null.
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/PolarizationClassification'
+
+    PolarizationPackage:
+      type: object
+      properties:
+        name:
+          type: string
+          example: measures
+        version:
+          type: string
+          example: 0.1.0a2
+        commit:
+          type: string
+          description: The installed commit (pip's `direct_url.json`).
+          example: 0e05564ed0b7b23de368dd19becac3a1de4ef745
+        url:
+          type: string
+          nullable: true
+          example: https://github.com/Ulvenforst/pol_measures.git
+
+    PolarizationCatalog:
+      type: object
+      required: [measures, alienations, classification, limits, package]
+      properties:
+        measures:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolarizationMeasure'
+        alienations:
+          type: array
+          description: The f(d) options of GeneralizedER / GeneralizedMEC.
+          items:
+            type: object
+            required: [id, label, tex]
+            properties:
+              id:
+                type: string
+                example: exp(d)-1
+              label:
+                type: string
+                example: "eᵈ − 1"
+              tex:
+                type: string
+                example: e^{d} - 1
+        classification:
+          type: object
+          properties:
+            method:
+              type: string
+              example: kmeans
+            levels:
+              type: integer
+              example: 3
+        limits:
+          type: object
+          properties:
+            minCategories:
+              type: integer
+              example: 2
+            maxCategories:
+              type: integer
+              example: 10
+            maxRounds:
+              type: integer
+              description: Histograms per `POST /simulations/polarization`.
+              example: 20000
+            maxBodyBytes:
+              type: integer
+              example: 8388608
+        package:
+          $ref: '#/components/schemas/PolarizationPackage'
+        versions:
+          type: object
+          properties:
+            numpy:
+              type: string
+              example: 2.5.4
+            scipy:
+              type: string
+              example: 1.18.1
+            python:
+              type: string
+              example: 3.12.3
+
+    PolarizationRequest:
+      type: object
+      required: [measure, k, histograms]
+      properties:
+        measure:
+          type: string
+          description: A catalog `id`.
+          example: EstebanRay
+        params:
+          type: object
+          description: |
+            Parameter values by name (numbers, a `choice` id, or `null` for a nullable one).
+            Missing ones take the package's default.
+          additionalProperties: true
+          example: {alpha: 0.8}
+        k:
+          type: integer
+          minimum: 2
+          maximum: 10
+          description: Number of categories; the positions are `x_j = j / (k - 1)`.
+          example: 5
+        histograms:
+          type: array
+          minItems: 1
+          maxItems: 20000
+          description: |
+            One histogram per round, each with exactly `k` finite weights >= 0 (agent counts or
+            fractions: the worker normalizes them to sum 1, the package's
+            `normalize_weights=True`). Identical histograms are computed once. An all-zero
+            histogram is a per-round error, not a request error.
+          items:
+            type: array
+            items:
+              type: number
+              minimum: 0
+          example: [[10, 0, 0, 0, 10], [0, 0, 20, 0, 0], [0, 0, 0, 0, 0]]
+
+    PolarizationResult:
+      type: object
+      required: [values, levels, classification, unique, package]
+      properties:
+        values:
+          type: array
+          description: One per histogram, in order; `null` where the package raised or gave a non-finite value.
+          items:
+            type: number
+            nullable: true
+          example: [0.9999999999999999, 0.0, null]
+        levels:
+          type: array
+          description: The level of each value (`classification`), `null` without classification.
+          items:
+            type: string
+            nullable: true
+          example: [high, low, null]
+        errors:
+          type: array
+          description: "Only when some round failed: the package's exception (`Type: message`) or `null`."
+          items:
+            type: string
+            nullable: true
+          example: [null, null, "ValueError: At least one weight must be positive"]
+        classification:
+          description: The thresholds that apply to the REQUESTED parameters, or null.
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/PolarizationClassification'
+        unique:
+          type: integer
+          description: Distinct histograms actually computed.
+          example: 3
+        package:
+          type: object
+          required: [ref, version]
+          properties:
+            ref:
+              type: string
+              description: The installed pol_measures commit.
+              example: 0e05564ed0b7b23de368dd19becac3a1de4ef745
+            version:
+              type: string
+              example: 0.1.0a2
+
 security:
   - BearerAuth: []
 
 tags:
   - name: Users
   - name: Simulations
+  - name: Polarization
   - name: WebSocket
 
 paths:
@@ -979,6 +1269,124 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /simulations/polarization/measures:
+    get:
+      tags: [Polarization]
+      summary: Polarization measures catalog (pol_measures)
+      description: |
+        Every measure pol_measures exports with its parameters (the package's defaults and
+        ranges), the k it supports, its classification thresholds for the default parameters,
+        the f(d) options, the request limits and the package / numpy / SciPy / Python versions
+        (#129). Cached in memory after the first call. Starts the worker if it is not running.
+      responses:
+        '200':
+          description: The catalog
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolarizationCatalog'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: "`not_found` — `APP_POLARIZATION=false`: the feature is disabled on this server."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: not_found
+                message: Polarization measures are disabled on this server (APP_POLARIZATION=false)
+        '503':
+          description: "`unavailable` — the worker could not be started or did not answer."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: unavailable
+                message: "The polarization worker could not be started: it exited during startup (exit code 1)"
+
+  /simulations/polarization:
+    post:
+      tags: [Polarization]
+      summary: Polarization of a series of histograms (pol_measures)
+      description: |
+        Computes one measure, with the given parameters, on each histogram (one per round), with
+        the real pol_measures package (#129). Each histogram is normalized to sum 1; identical
+        histograms are computed once. Per-round failures (e.g. an all-zero histogram) are `null`
+        values with the package's message in `errors`. Levels are given when the parameters match
+        one of the package's calibrated parameter sets.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PolarizationRequest'
+      responses:
+        '200':
+          description: One value / level (/ error) per histogram, in order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolarizationResult'
+        '400':
+          description: |
+            `invalid_body` — not JSON, a missing or mistyped member, `k` outside 2..10, no
+            histograms or more than 20000, a histogram without exactly `k` weights, or a weight
+            that is negative or not finite (`fields` names the member, e.g. `histograms[3][1]`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: invalid_body
+                message: Invalid polarization request
+                fields:
+                  - field: histograms[0][2]
+                    issue: must be a finite number >= 0
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: "`not_found` — `APP_POLARIZATION=false`: the feature is disabled on this server."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: "`payload_too_large` — the body exceeds 8 MiB (8388608 bytes)."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          description: |
+            `invalid_measure` — unknown measure, unknown parameter, a parameter outside the
+            package's range or rejected by its constructor / checks, or a `k` the measure is not
+            defined for (Experts: only 5) (`fields`: `measure`, `params.<name>` or `k`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: invalid_measure
+                message: Experts is not defined for k = 3 categories
+                fields:
+                  - field: k
+                    issue: "supported: 5"
+        '503':
+          description: |
+            `unavailable` — the worker could not be started, timed out (30 s), crashed or answered
+            malformed output (it is restarted; retry), or is busy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: unavailable
+                message: The polarization worker did not answer within 30 s; this request was not computed (the worker is being restarted, retry)
 
   /simulations/mine:
     get:
