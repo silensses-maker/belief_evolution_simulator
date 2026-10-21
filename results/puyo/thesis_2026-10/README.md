@@ -8,14 +8,20 @@ PostgreSQL database, under the run ids below.
 
 | File | Content | Run ids | Produced by |
 |---|---|---|---|
-| `parametric_results.csv` | Benchmark, N = 64…16 384: four regimes × 3 networks (static; Prop. C pure creation; Prop. A; Prop. B), iteration limit 500 | 160–195 | `core.simulation.ParametricTestRunner` |
-| `edge_case_results_phase1.csv` | Extreme initial distributions, N = 512: uniform baseline, bimodal 50/50, radical minority; Prop. A and B; limit 200 | 196–200 | Phase 1 scenarios (see the thesis, Sec. 6.7.1) |
-| `edge_case_results_phase2.csv` | Asymmetric tolerance (intolerant hubs) and absolute fluidity (P_break = P_create = 1), N = 512; official execution | 201–205 | `core.simulation.EdgeCaseRunner` |
-| `edge_case_results_phase2_exec2.csv`, `..._exec3.csv` | The same Phase 2 campaign run twice more, on different networks | 206–210, 211–215 | `core.simulation.EdgeCaseRunner` |
-| `edge_case_results_phase4.csv` | Resistance to consensus, N = 512: bimodal baseline, ablation P_create = 0, sub-critical τ = 0.02 | 216–218 | `core.simulation.EdgeCaseRunnerPhase4` |
-| `parametric_results_no_db_timing.csv` | The benchmark rerun without database persistence, for timing only (new networks) | — | `ParametricTestRunner` with `APP_SKIP_DATABASE=true` |
-| `non_consensus_networks.csv` | The 32 networks (of 177) that ended without consensus: stop reason, final κ, Φ and r, strongly connected components of the final topology | 160–218 | Final-round topology read from the database |
-| `case_studies_results.txt` | Final state of the Ch. 5 case studies: three hand-built networks, static and coevolutionary, 20 seeds each | — | Custom-network runs through `Monitor` (`RunCustomNetwork`) |
+| `parametric_results.csv` | Benchmark, N = 64…16 384: four regimes × 3 networks (static; Prop. C pure creation; Prop. A; Prop. B), iteration limit 500 | 160–195 | campaign `benchmark` |
+| `edge_case_results_phase1.csv` | Extreme initial distributions, N = 512: uniform baseline, bimodal 50/50, radical minority; Prop. A and B; limit 200 | 196–200 | campaign `extreme-distributions` (`phase1`) |
+| `edge_case_results_phase2.csv` | Asymmetric tolerance (intolerant hubs) and absolute fluidity (P_break = P_create = 1), N = 512; official execution | 201–205 | campaign `tolerance-fluidity:1` (`phase2`) |
+| `edge_case_results_phase2_exec2.csv`, `..._exec3.csv` | The same Phase 2 campaign run twice more, on different networks | 206–210, 211–215 | `tolerance-fluidity:2`, `tolerance-fluidity:3` |
+| `edge_case_results_phase4.csv` | Resistance to consensus, N = 512: bimodal baseline, ablation P_create = 0, sub-critical τ = 0.02 | 216–218 | campaign `consensus-resistance` (`phase4`) |
+| `parametric_results_no_db_timing.csv` | The benchmark rerun without database persistence, for timing only (new networks) | — | `benchmark` with `APP_SKIP_DATABASE=true`, before run ids were pinned |
+| `non_consensus_networks.csv` | The 32 networks (of 177) that ended without consensus: stop reason, final κ, Φ and r, strongly connected components of the final topology | 160–218 | `src/scripts/thesis/non_consensus.py 160 218` |
+| `case_studies_results.txt` | Final state of the Ch. 5 case studies: three hand-built networks, static and coevolutionary, 20 seeds each | — | `case-studies` (custom-network runs through `Monitor`) |
+
+The campaigns are defined in `core.simulation.thesis.ThesisCampaigns` and run with
+`core.simulation.thesis.RunThesisCampaign`; [`src/scripts/thesis/README.md`](../../../src/scripts/thesis/README.md)
+explains how to reproduce them (Docker) and which runs are reproduced exactly. The CSVs were produced on 2026-10-14 by
+the earlier runners `ParametricTestRunner`, `EdgeCaseRunner`, `EdgeCaseRunnerPhase4` and the harness classes
+`RerunPhase1` and `CaseHarness`, with the same scenarios; the catalogue replaces them.
 
 ## CSV columns
 
@@ -35,9 +41,10 @@ communities (see the thesis, Sec. 6.7.5).
 ## Notes
 
 - Scenario names contain commas and are not quoted. Read `RunID` as the fourth field from the end.
-- Each network's seed is `42 + runId + k` with `k = 1, 2, 3` (`networks.name` is `Nk`), so rerunning a campaign
-  produces new networks, and consecutive runs share networks shifted by one index (run 202 N3 and run 203 N2 are the
-  same network). Rounds and consensus counts vary accordingly.
+- Each network's seed is `42 + runId + k` with `k = 1, 2, 3` (`networks.name` is `Nk`), so consecutive runs share
+  networks shifted by one index (run 202 N3 and run 203 N2 are the same network). Rerunning a campaign under other
+  run ids produces new networks; `RunThesisCampaign` pins the thesis ids so that a replica rebuilds these ones, except
+  for the bimodal initial beliefs (runs 197, 198, 216–218), which were drawn without a seed (seeded since 2026-10-20).
 - Structural stop rules (`assortivityStopThreshold`, `fragmentationStop`) were disabled in every run; runs end by
   consensus, stability or the iteration limit.
 - Times include PostgreSQL persistence of every network's final topology, tens of millions of rows at N = 16 384.

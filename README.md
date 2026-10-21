@@ -202,22 +202,35 @@ sbt run
 
 ## Reproducibility & Empirical Benchmarks
 
-To execute the automated parametric benchmark suite evaluating scaling performance and consensus convergence across base-2 network sizes ($N \in \{64, 128, \dots, 16384\}$) for all coevolutionary scenarios:
+The experiments of J. E. Puyo's thesis are defined once in `core.simulation.thesis.ThesisCampaigns` and run with a
+single entry point. The whole pipeline (campaigns on a fresh database, case studies, tables and figures) runs in
+Docker:
 
 ```bash
-sbt "runMain core.simulation.ParametricTestRunner"
+src/scripts/thesis/reproduce.sh                                          # everything
+docker compose -f docker-compose.thesis.yml run --rm experiments list    # the campaigns and their run ids
 ```
 
-Results are logged to the console and persisted to `parametric_results.csv` (git-ignored) and to the PostgreSQL database.
-
-The stress tests of the thesis:
+or with sbt against a PostgreSQL of your own:
 
 ```bash
-sbt "runMain core.simulation.EdgeCaseRunner"        # phase 2: asymmetric tolerance, absolute fluidity
-sbt "runMain core.simulation.EdgeCaseRunnerPhase4"  # phase 4: resistance to consensus (ablation, sub-critical tolerance)
+sbt "runMain core.simulation.thesis.RunThesisCampaign list"
+sbt "runMain core.simulation.thesis.RunThesisCampaign benchmark --out results/replica"
 ```
 
-Each network's seed is `seed + runId + index`, so repeating a campaign generates new networks. The results reported in J. E. Puyo's thesis (run ids 160–218, October 2026) are in [`results/puyo/thesis_2026-10/`](results/puyo/thesis_2026-10/). Each author keeps their datasets under `results/<author>/`.
+| Campaign | Alias | Run ids | Thesis |
+|---|---|---|---|
+| `benchmark` (N = 64 … 16 384, four regimes) | | 160–195 | Sec. 6.2–6.3 |
+| `extreme-distributions` | `phase1` | 196–200 | Sec. 6.7.1 |
+| `tolerance-fluidity[:1\|2\|3]` (three executions) | `phase2` | 201–215 | Sec. 6.7.2 |
+| `small-world` (analysis, no simulation) | `phase3` | reads 196–205 | Sec. 6.7.3 |
+| `consensus-resistance` | `phase4` | 216–218 | Sec. 6.7.4 |
+| `case-studies` (no database) | | — | Ch. 5 |
+
+Each network's seed is `seed + runId + k`. The runner pins every run to its thesis run id, so on a fresh database it
+rebuilds the networks of the thesis; see [`src/scripts/thesis/README.md`](src/scripts/thesis/README.md) for what is
+reproduced exactly and what is not. The thesis dataset (run ids 160–218, October 2026) is in
+[`results/puyo/thesis_2026-10/`](results/puyo/thesis_2026-10/). Each author keeps their datasets under `results/<author>/`.
 
 ## Tests
 
@@ -232,6 +245,9 @@ sbt test
 - the row-stochastic invariant over random networks;
 - the assortativity coefficient, including its reduction to Djurdjevac Conrad et al.'s Eq. 6;
 - the SCC count and the fragmentation index.
+
+`ThesisCampaignsSuite` checks that the campaign catalogue matches the thesis dataset run by run (ids, scenarios,
+population sizes).
 
 ---
 

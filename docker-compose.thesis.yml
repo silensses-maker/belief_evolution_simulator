@@ -1,0 +1,108 @@
+# Reproducción de los experimentos de la tesis
+#   "Extensión de los Modelos de Evolución de la Opinión SOM+ y SOM− a Redes Coevolutivas"
+#   (J. E. Puyo Mora, Universidad del Valle, 2026).
+#
+# Stack propio y aislado: base de datos nueva (volumen thesis_pgdata), sin puertos publicados y con credenciales
+# locales, así que no interfiere con docker-compose.yml ni con sus datos. No requiere .env.
+#
+#   src/scripts/thesis/reproduce.sh            # todo: campañas, casos de estudio, tablas y figuras
+#   docker compose -f docker-compose.thesis.yml run --rm experiments list
+#
+# Ver src/scripts/thesis/README.md.
+name: silensses-thesis
+
+x-db-env: &db-env
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_NAME: promueva
+  DB_USER: postgres
+  DB_PASSWORD: postgres
+  DB_HOST_LEGACY: postgres
+  DB_PORT_LEGACY: "5432"
+  DB_NAME_LEGACY: promueva_legacy
+  DB_USER_LEGACY: postgres
+  DB_PASSWORD_LEGACY: postgres
+
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile_db
+    environment:
+      POSTGRES_DB: promueva
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB_LEGACY: promueva_legacy
+      POSTGRES_USER_LEGACY: postgres
+      POSTGRES_PASSWORD_LEGACY: postgres
+    volumes:
+      - thesis_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Ready once the legacy schema, including the coevolution metrics table, exists.
+      test: ["CMD-SHELL", "psql -U postgres -d promueva_legacy -tAc \"select to_regclass('public.network_coevolution_metrics')\" | grep -q network_coevolution_metrics"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  # Campaign runner (core.simulation.thesis.RunThesisCampaign). Default command: the five simulated campaigns.
+  experiments:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["/app/bin/extended_model", "-main", "core.simulation.thesis.RunThesisCampaign",
+                 "-J--add-modules=jdk.incubator.vector", "-J--enable-preview"]
+    command: ["all", "--out", "/results"]
+    environment:
+      <<: *db-env
+      APP_SKIP_DATABASE: "false"
+      APP_SERVER_MODE: "false"
+      APP_LOCAL_MODE: "true"
+      APP_LEGACY_DB: "true"
+      APP_SKIP_WS: "true"
+      APP_SERVER_LOGS: "false"
+      APP_GENERAL_LOGS: "false"
+      APP_SIMULATION_LOGS: "false"
+      JAVA_OPTS: ${THESIS_JAVA_OPTS:--Xmx24g}
+    volumes:
+      - ${THESIS_RESULTS:-./results/replica}:/results
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Ch. 5 case studies: no database; the per-round log (stdout) feeds the case figures.
+  case-studies:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["/app/bin/extended_model", "-main", "core.simulation.thesis.RunThesisCampaign",
+                 "-J--add-modules=jdk.incubator.vector", "-J--enable-preview"]
+    command: ["case-studies", "--out", "/results"]
+    environment:
+      APP_SKIP_DATABASE: "true"
+      APP_SERVER_MODE: "false"
+      APP_LOCAL_MODE: "true"
+      APP_LEGACY_DB: "false"
+      APP_SKIP_WS: "true"
+      APP_SERVER_LOGS: "false"
+      APP_GENERAL_LOGS: "false"
+      APP_SIMULATION_LOGS: "true"
+    volumes:
+      - ${THESIS_RESULTS:-./results/replica}:/results
+
+  # Tables and figures of Ch. 5 and 6 from the database and the campaign CSVs (src/scripts/thesis/analyze_all.py).
+  analysis:
+    build:
+      context: .
+      dockerfile: src/scripts/thesis/Dockerfile
+    command: ["/results"]
+    environment:
+      <<: *db-env
+    volumes:
+      - ${THESIS_RESULTS:-./results/replica}:/results
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  thesis_pgdata:

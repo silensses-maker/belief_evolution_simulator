@@ -1653,6 +1653,40 @@ object DatabaseManager {
     }
 
     // ============================================================================
+    // THESIS CAMPAIGNS: pinned run ids (see core.simulation.thesis)
+    // ============================================================================
+
+    /** True if the legacy database already holds a run with this id. */
+    def legacyRunExists(runId: Long): Boolean = {
+        val conn = getConnectionLegacy
+        try {
+            val stmt = conn.prepareStatement("SELECT 1 FROM public.runs WHERE id = ?")
+            stmt.setLong(1, runId)
+            stmt.executeQuery().next()
+        } finally {
+            conn.close()
+        }
+    }
+
+    /**
+     * Makes the next run created in the legacy database receive `runId`. Network seeds are `seed + runId + k`, so
+     * this is what lets a thesis campaign rebuild exactly the networks of the original experiments on a fresh
+     * database. Fails if the id is already taken.
+     */
+    def pinNextLegacyRunId(runId: Long): Unit = {
+        if (legacyRunExists(runId))
+            throw new IllegalStateException(s"Run id $runId already exists in the legacy database")
+        val conn = getConnectionLegacy
+        try {
+            val stmt = conn.prepareStatement("SELECT setval('public.runs_id_seq', ?, false)")
+            stmt.setLong(1, runId)
+            stmt.execute()
+        } finally {
+            conn.close()
+        }
+    }
+
+    // ============================================================================
     // FRAME PERSISTENCE (network_frames)
     // ============================================================================
 
