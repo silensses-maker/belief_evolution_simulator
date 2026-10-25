@@ -45,6 +45,13 @@ for line in lines:
         'AvgRounds': float(parts[-1])
     })
 df_csv = pd.DataFrame(records)
+# Labels as in Table 6.2 of the thesis (the CSV keeps the runner's English scenario names)
+LABELS = {
+    'Baseline (Static)': 'Baseline (Estática)',
+    'Scenario A (Pure Creation, Prop C)': 'Escenario A (Creación Pura, Prop. C)',
+    'Scenario B (Uniform, Prop A)': 'Escenario B (Uniforme, Prop. A)',
+    'Scenario B (Homophilic, Prop B)': 'Escenario B (Homofílico, Prop. B)',
+}
 
 palette = {
     'Baseline (Static)': '#1f77b4',
@@ -65,7 +72,7 @@ fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
 for scenario in df_csv['Scenario'].unique():
     sub = df_csv[df_csv['Scenario'] == scenario].sort_values('PopulationSize')
     ax1.plot(sub['PopulationSize'], sub['TotalDurationMs'], 
-             label=scenario, color=palette[scenario], marker=markers[scenario], 
+             label=LABELS[scenario], color=palette[scenario], marker=markers[scenario], 
              linewidth=2.2, markersize=7)
 
 ax1.set_xscale('log', base=2)
@@ -83,27 +90,35 @@ _cur = _c.cursor()
 _cur.execute('select run_id, final_round, simulation_outcome from networks where run_id = any(%s)', (list(map(int, df_csv['RunID'])),))
 _per = pd.DataFrame(_cur.fetchall(), columns=['RunID', 'final_round', 'consensus']); _c.close()
 _agg = _per.groupby('RunID').apply(lambda g: pd.Series({'n_cons': int(g['consensus'].sum()), 'n': len(g),
-       'rounds_cons': g.loc[g['consensus'], 'final_round'].mean()})).reset_index()
+       'rounds_cons': g.loc[g['consensus'], 'final_round'].median(),
+       'rounds_min': g.loc[g['consensus'], 'final_round'].min(),
+       'rounds_max': g.loc[g['consensus'], 'final_round'].max()})).reset_index()
 df_csv = df_csv.merge(_agg, on='RunID')
+# small horizontal offset per scenario (log2 units) so that the min-max bars do not overlap
+DODGE = {'Baseline (Static)': -0.09, 'Scenario A (Pure Creation, Prop C)': -0.03,
+         'Scenario B (Uniform, Prop A)': 0.03, 'Scenario B (Homophilic, Prop B)': 0.09}
 for scenario in df_csv['Scenario'].unique():
     sub = df_csv[df_csv['Scenario'] == scenario].sort_values('PopulationSize')
+    sub = sub.assign(x=sub['PopulationSize'] * 2 ** DODGE[scenario])
     for _, _r in sub[sub['n_cons'] < sub['n']].iterrows():
-        ax2.plot(_r['PopulationSize'], _r['rounds_cons'], marker=markers[scenario], markersize=13,
+        ax2.plot(_r['x'], _r['rounds_cons'], marker=markers[scenario], markersize=13,
                  markerfacecolor='none', markeredgecolor=palette[scenario], markeredgewidth=1.6, linestyle='none')
-        ax2.annotate(f"{int(_r['n_cons'])}/{int(_r['n'])}", (_r['PopulationSize'], _r['rounds_cons']),
+        ax2.annotate(f"{int(_r['n_cons'])}/{int(_r['n'])}", (_r['x'], _r['rounds_cons']),
                      textcoords='offset points', xytext=(7, 7), fontsize=8.5, fontweight='bold', color=palette[scenario])
-    ax2.plot(sub['PopulationSize'], sub['rounds_cons'], 
-             label=scenario, color=palette[scenario], marker=markers[scenario], 
-             linewidth=2.2, markersize=7)
+    ax2.errorbar(sub['x'], sub['rounds_cons'],
+                 yerr=[sub['rounds_cons'] - sub['rounds_min'], sub['rounds_max'] - sub['rounds_cons']],
+                 label=LABELS[scenario], color=palette[scenario], marker=markers[scenario],
+                 linewidth=2.2, markersize=7, capsize=3, elinewidth=1, alpha=0.95)
 
 ax2.set_xscale('log', base=2)
 ax2.set_xlabel('Tamaño de Población N (Escala log₂)', fontsize=11, fontweight='bold')
-ax2.set_ylabel('Rondas Promedio (redes con consenso)', fontsize=11, fontweight='bold')
-ax2.set_title('(b) Rondas hasta Consenso (k/3 = redes con consenso)', fontsize=12, fontweight='bold')
+ax2.set_ylabel('Rondas hasta el consenso (mediana)', fontsize=11, fontweight='bold')
+ax2.set_title('(b) Rondas hasta el Consenso (mediana; barras: mín.–máx.)', fontsize=12, fontweight='bold')
 ax2.set_xticks(df_csv['PopulationSize'].unique())
 ax2.get_xaxis().set_major_formatter(ticker.ScalarFormatter())
 ax2.grid(True, which='both', linestyle='--', alpha=0.5)
-ax2.legend(loc='upper right', frameon=True, fontsize=9)
+ax2.set_ylim(6, 44)
+ax2.legend(loc='upper left', frameon=True, fontsize=8.5, ncol=2)
 
 plt.tight_layout()
 plt.savefig(f'{output_dir}/fig_benchmark_scalability.png', bbox_inches='tight')
@@ -137,7 +152,7 @@ for idx, N in enumerate(target_sizes):
         if scen_data.empty: continue
         
         grouped = scen_data.groupby('round_number')['assortativity'].agg(['mean', 'std']).reset_index()
-        ax.plot(grouped['round_number'], grouped['mean'], label=scenario, 
+        ax.plot(grouped['round_number'], grouped['mean'], label=LABELS[scenario], 
                 color=palette[scenario], marker=markers[scenario], linewidth=2)
         if grouped['std'].notnull().any():
             ax.fill_between(grouped['round_number'], 
@@ -150,9 +165,9 @@ for idx, N in enumerate(target_sizes):
     if idx == 0:
         ax.set_ylabel('Asortatividad de Opinión rᵗ', fontsize=11, fontweight='bold')
     ax.grid(True, linestyle='--', alpha=0.5)
-    ax.set_ylim(-0.15, 0.85)
+    ax.set_ylim(-0.15, 0.95)
     if idx == 2:
-        ax.legend(loc='lower right', frameon=True, fontsize=8.5)
+        ax.legend(loc='upper right', frameon=True, fontsize=8.5)
 
 plt.tight_layout()
 plt.savefig(f'{output_dir}/fig_coevolution_assortativity.png', bbox_inches='tight')
@@ -171,9 +186,9 @@ for scenario in ['Scenario A (Pure Creation, Prop C)', 'Scenario B (Uniform, Pro
         'fragmentation': 'mean'
     }).reset_index()
     
-    ax_scc.plot(grouped['round_number'], grouped['scc_count'], label=scenario,
+    ax_scc.plot(grouped['round_number'], grouped['scc_count'], label=LABELS[scenario],
                 color=palette[scenario], marker=markers[scenario], linewidth=2)
-    ax_frag.plot(grouped['round_number'], grouped['fragmentation'], label=scenario,
+    ax_frag.plot(grouped['round_number'], grouped['fragmentation'], label=LABELS[scenario],
                  color=palette[scenario], marker=markers[scenario], linewidth=2)
 
 ax_scc.set_title('(a) Componentes Fuertemente Conexas κ(Gₜ) (N=4096)', fontsize=12, fontweight='bold')
