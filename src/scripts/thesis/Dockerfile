@@ -1,4 +1,4 @@
-# Analysis image for the thesis experiments (tables and figures). Built by docker-compose.thesis.yml.
+# Analysis image for the thesis experiments (tables and figures). Built by docker-compose.thesis-coevolution.yml.
 FROM python:3.12-slim
 
 WORKDIR /app/scripts/thesis

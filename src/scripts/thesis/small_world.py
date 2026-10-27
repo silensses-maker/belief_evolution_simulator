@@ -1,4 +1,4 @@
-"""Small-world metrics at T0 and T_final (Phase 3, thesis Sec. 6.7.3) for the networks of Phases 1 and 2
+"""Small-world metrics at T0 and T_final (Phase 3, thesis Sec. 5.5.3) for the networks of Phases 1 and 2
 (first execution). Writes <results_dir>/small_world_results.csv, read by figures/small_world.py.
 
 usage: python small_world.py <results_dir>

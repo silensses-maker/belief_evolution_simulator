@@ -17,8 +17,8 @@ PostgreSQL database, under the run ids below.
 | `non_consensus_networks.csv` | The 32 networks (of 177) that ended without consensus: stop reason, final κ, Φ and r, strongly connected components of the final topology | 160–218 | `src/scripts/thesis/non_consensus.py 160 218` |
 | `case_studies_results.txt` | Final state of the Ch. 5 case studies: the influence graphs of Aranda et al. (ICTAC 2025, Figs. 2, 4, 3 and 5; case 4 is the hidden consensus), static and coevolutionary, 20 seeds each; the coevolutionary runs mix seed and round (`mixedRoundSeed`, 2026-10-26) | — | `case-studies` (custom-network runs through `Monitor`) |
 
-The campaigns are defined in `core.simulation.thesis.ThesisCampaigns` and run with
-`core.simulation.thesis.RunThesisCampaign`; [`src/scripts/thesis/README.md`](../../../src/scripts/thesis/README.md)
+The campaigns are defined in `experiments.coevolution.ThesisCampaigns` and run with
+`experiments.coevolution.RunThesisCampaign`; [`src/scripts/thesis/README.md`](../../../src/scripts/thesis/README.md)
 explains how to reproduce them (Docker) and which runs are reproduced exactly. The CSVs were produced on 2026-10-14 by
 the earlier runners `ParametricTestRunner`, `EdgeCaseRunner`, `EdgeCaseRunnerPhase4` and the harness classes
 `RerunPhase1` and `CaseHarness`, with the same scenarios; the catalogue replaces them.
@@ -36,7 +36,7 @@ the earlier runners `ParametricTestRunner`, `EdgeCaseRunner`, `EdgeCaseRunnerPha
 others. `MinorWithNoExplicitNeighbours` counts minor components that are a single agent with no explicit in-neighbour
 (isolation rule: all of its weight went back to self-influence). `ListenersOfMinor` is, per minor component, how many
 outside agents still listen to it. `Pattern`: `a` isolated agents, `b` small closed groups, `c` several large
-communities (see the thesis, Sec. 6.7.5).
+communities (see the thesis, Sec. 5.6).
 
 ## Notes
 

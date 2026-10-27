@@ -1,4 +1,4 @@
-package core.simulation.thesis
+package experiments.coevolution
 
 import akka.actor.{ActorSystem, Props}
 import core.model.agent.behavior.bias.CognitiveBiases
@@ -58,7 +58,7 @@ object CaseStudies {
             f(0.15, 0.21, 0.40, 0.24)), memory = true)
     )
 
-    /** The specs and repetitions of the thesis (Sec. 5.1-5.3 and Annex A). */
+    /** The specs and repetitions of the thesis (Sec. 5.1 and Annex A). */
     val ThesisRepetitions: Int = 20
     val ThesisSpecs: Seq[String] = Seq(
         "caso1:static", "caso2:static", "caso3:static",

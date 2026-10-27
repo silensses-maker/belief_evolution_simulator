@@ -1,4 +1,4 @@
-"""Extreme initial distributions (Phase 1, Sec. 6.7.1): fig_edge_case_phase1_assortativity.
+"""Extreme initial distributions (Phase 1, Sec. 5.5.1): fig_edge_case_phase1_assortativity.
 
 usage: python extreme_distributions_assortativity.py <results_dir> <figures_dir>
   results_dir  folder with the campaign CSVs (run ids are read from them)

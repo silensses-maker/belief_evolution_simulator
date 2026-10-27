@@ -1,4 +1,4 @@
-"""Asymmetric tolerance and absolute fluidity (Phase 2, Sec. 6.7.2), first execution:
+"""Asymmetric tolerance and absolute fluidity (Phase 2, Sec. 5.5.2), first execution:
 fig_edge_case_phase2_tolerance.
 
 usage: python tolerance_fluidity_assortativity.py <results_dir> <figures_dir>

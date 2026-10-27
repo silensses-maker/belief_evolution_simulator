@@ -1,4 +1,4 @@
-package core.simulation.thesis
+package experiments.coevolution
 
 import core.simulation.actors.CoevolutionConfig
 import utils.rng.distributions.{BiModal, Distribution, RadicalMinority, Uniform}
@@ -12,6 +12,9 @@ import utils.rng.distributions.{BiModal, Distribution, RadicalMinority, Uniform}
  * database and rebuilds the same networks. The thesis numbers its experimental phases 1-4; phase 3 (small-world
  * evolution) is an analysis of the phase 1 and 2 networks and has no simulation of its own
  * (`src/scripts/thesis/small_world.py`).
+ *
+ * Frozen: these campaigns reproduce a published thesis (tag `thesis-2026-10`). Add new coevolution experiments in a
+ * separate object instead of editing them (see `src/main/scala/experiments/README.md`).
  */
 final case class Scenario(
     name: String,                         // as written in the campaign CSV
@@ -54,7 +57,7 @@ object ThesisCampaigns {
     private def sequential(firstId: Long, n: Int, scenarios: Seq[Scenario], limit: Int): Seq[PlannedRun] =
         scenarios.zipWithIndex.map { case (s, i) => PlannedRun(firstId + i, n, s, limit) }
 
-    /** Sec. 6.2-6.3: four regimes x nine sizes, size-major order (runs 160-195). */
+    /** Sec. 5.3-5.4: four regimes x nine sizes, size-major order (runs 160-195). */
     val benchmark: Campaign = {
         val scenarios = Seq(
             Scenario("Baseline (Static)", Uniform, "uniform", None),
@@ -66,12 +69,12 @@ object ThesisCampaigns {
             (n, i) <- PopulationSizes.zipWithIndex
             (s, j) <- scenarios.zipWithIndex
         } yield PlannedRun(160L + i * scenarios.length + j, n, s, 500)
-        Campaign("benchmark", None, 1, "6.2-6.3", "Parametric benchmark, N = 64 ... 16 384, four regimes",
+        Campaign("benchmark", None, 1, "5.3-5.4", "Parametric benchmark, N = 64 ... 16 384, four regimes",
             "parametric_results.csv", runs)
     }
 
-    /** Sec. 6.7.1, phase 1: extreme initial distributions, N = 512 (runs 196-200). */
-    val extremeDistributions: Campaign = Campaign("extreme-distributions", Some("phase1"), 1, "6.7.1",
+    /** Sec. 5.5.1, phase 1: extreme initial distributions, N = 512 (runs 196-200). */
+    val extremeDistributions: Campaign = Campaign("extreme-distributions", Some("phase1"), 1, "5.5.1",
         "Uniform baseline, bimodal 50/50 polarization, 10% radical minority; Prop. A and B",
         "edge_case_results_phase1.csv",
         sequential(196L, 512, Seq(
@@ -92,17 +95,17 @@ object ThesisCampaigns {
         Scenario("Case 2B: Absolute Fluidity (Uniform, Prop A)", Uniform, "uniform", coevolution(1.0f, 1.0f, 0))
     )
 
-    /** Sec. 6.7.2, phase 2: intolerant hubs and absolute fluidity, N = 512, three executions (runs 201-215). */
+    /** Sec. 5.5.2, phase 2: intolerant hubs and absolute fluidity, N = 512, three executions (runs 201-215). */
     def toleranceFluidity(execution: Int): Campaign = {
         require(1 <= execution && execution <= 3, "tolerance-fluidity has executions 1, 2 and 3")
-        Campaign("tolerance-fluidity", Some("phase2"), execution, "6.7.2",
+        Campaign("tolerance-fluidity", Some("phase2"), execution, "5.5.2",
             s"Intolerant hubs and absolute fluidity, execution $execution of 3",
             if (execution == 1) "edge_case_results_phase2.csv" else s"edge_case_results_phase2_exec$execution.csv",
             sequential(201L + 5 * (execution - 1), 512, toleranceFluidityScenarios, 200))
     }
 
-    /** Sec. 6.7.4, phase 4: resistance to consensus on a bimodal population, N = 512 (runs 216-218). */
-    val consensusResistance: Campaign = Campaign("consensus-resistance", Some("phase4"), 1, "6.7.4",
+    /** Sec. 5.5.4, phase 4: resistance to consensus on a bimodal population, N = 512 (runs 216-218). */
+    val consensusResistance: Campaign = Campaign("consensus-resistance", Some("phase4"), 1, "5.5.4",
         "Bimodal baseline, ablation (P_create = 0) and sub-critical tolerance (tau = 0.02)",
         "edge_case_results_phase4.csv",
         sequential(216L, 512, Seq(

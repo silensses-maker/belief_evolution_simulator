@@ -1,4 +1,4 @@
-"""Small-world evolution (Phase 3, Sec. 6.7.3): fig_edge_case_phase3_smallworld. Reads
+"""Small-world evolution (Phase 3, Sec. 5.5.3): fig_edge_case_phase3_smallworld. Reads
 <results_dir>/small_world_results.csv, written by ../small_world.py.
 
 usage: python small_world.py <results_dir> <figures_dir>

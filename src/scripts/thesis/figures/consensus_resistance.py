@@ -1,4 +1,4 @@
-"""Resistance to consensus (Phase 4, Sec. 6.7.4): fig_edge_case_phase4_resistance,
+"""Resistance to consensus (Phase 4, Sec. 5.5.4): fig_edge_case_phase4_resistance,
 fig_edge_case_phase4_convergence.
 
 usage: python consensus_resistance.py <results_dir> <figures_dir>

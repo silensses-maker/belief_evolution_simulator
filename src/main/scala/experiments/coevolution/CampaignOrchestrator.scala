@@ -1,4 +1,4 @@
-package core.simulation.thesis
+package experiments.coevolution
 
 import akka.actor.{Actor, ActorRef, Props}
 import core.model.agent.behavior.bias.CognitiveBiases

@@ -84,7 +84,7 @@ class CoevolutionEngineSuite extends munit.FunSuite {
         assertEqualsFloat(r(2), 0.3f * s2 / (s1 + s2), eps)
     }
 
-    test("Propuesta C: with nothing lost, the neighbourhood is renormalized including self (S_ii = 1)") {
+    test("Propuesta C: with nothing lost, the neighbourhood is renormalized including self (similarity 1)") {
         // agent 0 keeps neighbour 1 and gains 2; pBreak = 0 so nothing is lost
         val net = csr(3, Map(0 -> Seq((1, 0.4f))))
         val beliefs = Array(0.5f, 0.55f, 0.45f)

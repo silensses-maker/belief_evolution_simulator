@@ -1,5 +1,5 @@
 """Networks that ended without consensus, with the strongly connected components of their final topology
-(thesis Sec. 6.7.5, Table "Las 32 redes sin consenso").
+(thesis Sec. 5.6, Table "Las 32 redes sin consenso").
 
 usage: python non_consensus.py <first_run_id> <last_run_id> <out.csv>
        (thesis: 160 218 non_consensus_networks.csv)

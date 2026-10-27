@@ -1,13 +1,13 @@
-"""Regenerates the tables and figures of thesis Ch. 3, 5 and 6 from a results folder and the database.
+"""Regenerates the tables and figures of thesis Ch. 3 and 5 from a results folder and the database.
 
 usage: python analyze_all.py <results_dir> [--figures DIR]
 
 <results_dir> holds the campaign CSVs written by RunThesisCampaign (results/puyo/thesis_2026-10/ for the thesis
 itself) and, optionally, case_studies.log (stdout of `RunThesisCampaign case-studies` with
 APP_SIMULATION_LOGS=true). Outputs, in <results_dir> unless --figures is given for the figures:
-  non_consensus_networks.csv   networks without consensus and their components (Sec. 6.7.5)
-  small_world_results.csv      small-world metrics, phase 3 (Sec. 6.7.3)
-  figures/*.pdf|png            every figure of Ch. 3 (rupture), Ch. 5 (cases) and Ch. 6 (experiments)
+  non_consensus_networks.csv   networks without consensus and their components (Sec. 5.6)
+  small_world_results.csv      small-world metrics, phase 3 (Sec. 5.5.3)
+  figures/*.pdf|png            every figure of Ch. 3 (rupture), Sec. 5.1 (cases) and Sec. 5.3–5.5 (experiments)
 The database is read through thesis_db.connect() (DB_*_LEGACY variables).
 """
 import argparse

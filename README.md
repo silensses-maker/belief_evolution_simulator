@@ -202,30 +202,33 @@ sbt run
 
 ## Reproducibility & Empirical Benchmarks
 
-The experiments of J. E. Puyo's thesis are defined once in `core.simulation.thesis.ThesisCampaigns` and run with a
+Studies built on the simulator live in `src/main/scala/experiments/`, one subpackage per study; its
+[README](src/main/scala/experiments/README.md) describes the layout for adding one.
+
+The experiments of J. E. Puyo's thesis are defined once in `experiments.coevolution.ThesisCampaigns` and run with a
 single entry point. The whole pipeline (campaigns on a fresh database, case studies, tables and figures) runs in
 Docker:
 
 ```bash
 src/scripts/thesis/reproduce.sh                                          # everything
-docker compose -f docker-compose.thesis.yml run --rm experiments list    # the campaigns and their run ids
+docker compose -f docker-compose.thesis-coevolution.yml run --rm experiments list    # the campaigns and their run ids
 ```
 
 or with sbt against a PostgreSQL of your own:
 
 ```bash
-sbt "runMain core.simulation.thesis.RunThesisCampaign list"
-sbt "runMain core.simulation.thesis.RunThesisCampaign benchmark --out results/replica"
+sbt "runMain experiments.coevolution.RunThesisCampaign list"
+sbt "runMain experiments.coevolution.RunThesisCampaign benchmark --out results/replica"
 ```
 
 | Campaign | Alias | Run ids | Thesis |
 |---|---|---|---|
-| `benchmark` (N = 64 … 16 384, four regimes) | | 160–195 | Sec. 6.2–6.3 |
-| `extreme-distributions` | `phase1` | 196–200 | Sec. 6.7.1 |
-| `tolerance-fluidity[:1\|2\|3]` (three executions) | `phase2` | 201–215 | Sec. 6.7.2 |
-| `small-world` (analysis, no simulation) | `phase3` | reads 196–205 | Sec. 6.7.3 |
-| `consensus-resistance` | `phase4` | 216–218 | Sec. 6.7.4 |
-| `case-studies` (no database) | | — | Ch. 5 |
+| `benchmark` (N = 64 … 16 384, four regimes) | | 160–195 | Sec. 5.3–5.4 |
+| `extreme-distributions` | `phase1` | 196–200 | Sec. 5.5.1 |
+| `tolerance-fluidity[:1\|2\|3]` (three executions) | `phase2` | 201–215 | Sec. 5.5.2 |
+| `small-world` (analysis, no simulation) | `phase3` | reads 196–205 | Sec. 5.5.3 |
+| `consensus-resistance` | `phase4` | 216–218 | Sec. 5.5.4 |
+| `case-studies` (no database) | | — | Sec. 5.1, Annex A |
 
 Each network's seed is `seed + runId + k`. The runner pins every run to its thesis run id, so on a fresh database it
 rebuilds the networks of the thesis; see [`src/scripts/thesis/README.md`](src/scripts/thesis/README.md) for what is

@@ -1653,7 +1653,7 @@ object DatabaseManager {
     }
 
     // ============================================================================
-    // THESIS CAMPAIGNS: pinned run ids (see core.simulation.thesis)
+    // PINNED RUN IDS: reproducible campaigns that rebuild the networks of earlier runs (e.g. experiments.coevolution)
     // ============================================================================
 
     /** True if the legacy database already holds a run with this id. */

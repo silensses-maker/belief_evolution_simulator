@@ -1,4 +1,4 @@
-package core.simulation.thesis
+package experiments.coevolution
 
 import java.io.File
 import scala.io.Source

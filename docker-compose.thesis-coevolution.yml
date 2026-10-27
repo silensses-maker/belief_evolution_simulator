@@ -6,10 +6,10 @@
 # locales, así que no interfiere con docker-compose.yml ni con sus datos. No requiere .env.
 #
 #   src/scripts/thesis/reproduce.sh            # todo: campañas, casos de estudio, tablas y figuras
-#   docker compose -f docker-compose.thesis.yml run --rm experiments list
+#   docker compose -f docker-compose.thesis-coevolution.yml run --rm experiments list
 #
 # Ver src/scripts/thesis/README.md.
-name: silensses-thesis
+name: silensses-thesis-coevolution
 
 x-db-env: &db-env
   DB_HOST: postgres
@@ -45,12 +45,12 @@ services:
       retries: 30
       start_period: 15s
 
-  # Campaign runner (core.simulation.thesis.RunThesisCampaign). Default command: the five simulated campaigns.
+  # Campaign runner (experiments.coevolution.RunThesisCampaign). Default command: the five simulated campaigns.
   experiments:
     build:
       context: .
       dockerfile: Dockerfile
-    entrypoint: ["/app/bin/extended_model", "-main", "core.simulation.thesis.RunThesisCampaign",
+    entrypoint: ["/app/bin/extended_model", "-main", "experiments.coevolution.RunThesisCampaign",
                  "-J--add-modules=jdk.incubator.vector", "-J--enable-preview"]
     command: ["all", "--out", "/results"]
     environment:
@@ -75,7 +75,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    entrypoint: ["/app/bin/extended_model", "-main", "core.simulation.thesis.RunThesisCampaign",
+    entrypoint: ["/app/bin/extended_model", "-main", "experiments.coevolution.RunThesisCampaign",
                  "-J--add-modules=jdk.incubator.vector", "-J--enable-preview"]
     command: ["case-studies", "--out", "/results"]
     environment:

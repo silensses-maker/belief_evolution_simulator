@@ -239,7 +239,7 @@ object CoevolutionEngine {
                     if (newNeighborsRefs(idx) == i) hasExplicitSelf = true
                     idx += 1
                 }
-                // eq:propuesta_c normalizes over N_i^{t+1} ∪ {i} with S_ii = 1. When self-influence is implicit,
+                // eq:propuesta_c normalizes over N_i^{t+1} ∪ {i} with ω_ii = 1 (self-similarity). When self-influence is implicit,
                 // add its similarity to the denominator so it keeps I_ii^{t+1} = 1 / Σ S instead of dropping to 0.
                 if (!hasExplicitSelf) similaritySum += 1f
 

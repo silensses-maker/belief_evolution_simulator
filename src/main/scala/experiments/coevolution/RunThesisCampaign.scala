@@ -1,4 +1,4 @@
-package core.simulation.thesis
+package experiments.coevolution
 
 import akka.actor.{ActorSystem, Props}
 import com.typesafe.config.ConfigFactory
@@ -13,10 +13,10 @@ import scala.concurrent.{Await, Promise}
  * Entry point for the thesis experiments.
  *
  * {{{
- * sbt "runMain core.simulation.thesis.RunThesisCampaign list"
- * sbt "runMain core.simulation.thesis.RunThesisCampaign all --out results/replica"
- * sbt "runMain core.simulation.thesis.RunThesisCampaign benchmark --sizes 64,128"
- * sbt "runMain core.simulation.thesis.RunThesisCampaign case-studies"     (APP_SKIP_DATABASE=true, APP_LEGACY_DB=false)
+ * sbt "runMain experiments.coevolution.RunThesisCampaign list"
+ * sbt "runMain experiments.coevolution.RunThesisCampaign all --out results/replica"
+ * sbt "runMain experiments.coevolution.RunThesisCampaign benchmark --sizes 64,128"
+ * sbt "runMain experiments.coevolution.RunThesisCampaign case-studies"     (APP_SKIP_DATABASE=true, APP_LEGACY_DB=false)
  * }}}
  *
  * Campaigns: benchmark, extreme-distributions (phase1), tolerance-fluidity[:1|2|3] (phase2),
@@ -151,7 +151,7 @@ object RunThesisCampaign {
             val ids = s"${c.runs.head.thesisRunId}-${c.runs.last.thesisRunId}"
             println(f"${c.label}%-24s ${c.alias.getOrElse("")}%-7s $ids%-9s ${c.thesisSection}%-8s ${c.description}")
         }
-        println(f"${"small-world"}%-24s ${"phase3"}%-7s ${"196-205"}%-9s ${"6.7.3"}%-8s analysis only: src/scripts/thesis/small_world.py")
-        println(f"${"case-studies"}%-24s ${""}%-7s ${"-"}%-9s ${"5.1-5.3"}%-8s Ch. 5 hand-built networks, 20 seeds (APP_SKIP_DATABASE=true)")
+        println(f"${"small-world"}%-24s ${"phase3"}%-7s ${"196-205"}%-9s ${"5.5.3"}%-8s analysis only: src/scripts/thesis/small_world.py")
+        println(f"${"case-studies"}%-24s ${""}%-7s ${"-"}%-9s ${"5.1"}%-8s ICTAC influence graphs, four cases, 20 seeds (APP_SKIP_DATABASE=true)")
     }
 }

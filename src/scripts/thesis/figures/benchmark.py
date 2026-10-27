@@ -1,4 +1,4 @@
-"""Benchmark figures (thesis Sec. 6.2-6.3): fig_benchmark_scalability, fig_coevolution_assortativity,
+"""Benchmark figures (thesis Sec. 5.3-5.4): fig_benchmark_scalability, fig_coevolution_assortativity,
 fig_coevolution_fragmentation_scc. Panel (b) of the scalability figure averages only the networks that reached
 consensus and labels the points where fewer than 3 of 3 did.
 
