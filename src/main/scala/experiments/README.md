@@ -15,5 +15,6 @@ needs. The simulator itself (`core`, `io`, `utils`) never depends on this packag
   stay in the subpackage.
 - Keep the other artifacts of the study namespaced the same way: results under `results/<author>/<study>_<date>/`, a
   Docker stack as `docker-compose.<type>-<topic>.yml` with its own `name:`, so containers and volumes cannot collide.
-- Once a study is published, treat its campaign definitions as frozen and tag the commit (e.g. `thesis-2026-10`). New
-  experiments on the same topic go in a new object or subpackage, not in the published campaigns.
+- Once a study is published, treat its campaign definitions as frozen and tag the commit as `<type>-<topic>-<date>`
+  (e.g. `thesis-coevolution-2026-10`). New experiments on the same topic go in a new object or subpackage, not in the
+  published campaigns.

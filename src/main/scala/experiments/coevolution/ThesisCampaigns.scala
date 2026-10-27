@@ -13,7 +13,7 @@ import utils.rng.distributions.{BiModal, Distribution, RadicalMinority, Uniform}
  * evolution) is an analysis of the phase 1 and 2 networks and has no simulation of its own
  * (`src/scripts/thesis/small_world.py`).
  *
- * Frozen: these campaigns reproduce a published thesis (tag `thesis-2026-10`). Add new coevolution experiments in a
+ * Frozen: these campaigns reproduce a published thesis (tag `thesis-coevolution-2026-10`). Add new coevolution experiments in a
  * separate object instead of editing them (see `src/main/scala/experiments/README.md`).
  */
 final case class Scenario(
