@@ -45,10 +45,10 @@ conn.close()
 # Scenario map
 scenario_map = {
     P2[0]: "Línea Base\n(tau=0.10, Prop. B)",
-    P2[1]: "Caso 2A: Hubs Intol.\n(Homofílico, Prop. B)",
-    P2[2]: "Caso 2A: Hubs Intol.\n(Uniforme, Prop. A)",
-    P2[3]: "Caso 2B: Fluidez Abs.\n(Homofílico, Prop. B)",
-    P2[4]: "Caso 2B: Fluidez Abs.\n(Uniforme, Prop. A)"
+    P2[1]: "Config. 2A: Hubs Intol.\n(Homofílico, Prop. B)",
+    P2[2]: "Config. 2A: Hubs Intol.\n(Uniforme, Prop. A)",
+    P2[3]: "Config. 2B: Fluidez Abs.\n(Homofílico, Prop. B)",
+    P2[4]: "Config. 2B: Fluidez Abs.\n(Uniforme, Prop. A)"
 }
 
 colors = ["#2b5c8f", "#d35400", "#f39c12", "#16a085", "#8e44ad"]

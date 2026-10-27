@@ -49,10 +49,10 @@ conn.close()
 # Scenario map
 scenario_map = {
     P2[0]: "Línea Base: Tolerancia Homogénea (tau=0.10, Prop. B)",
-    P2[1]: "Caso 2A: Hubs Intolerantes (Homofílico, Prop. B)",
-    P2[2]: "Caso 2A: Hubs Intolerantes (Uniforme, Prop. A)",
-    P2[3]: "Caso 2B: Fluidez Absoluta (Homofílica, Prop. B)",
-    P2[4]: "Caso 2B: Fluidez Absoluta (Uniforme, Prop. A)"
+    P2[1]: "Config. 2A: Hubs Intolerantes (Homofílico, Prop. B)",
+    P2[2]: "Config. 2A: Hubs Intolerantes (Uniforme, Prop. A)",
+    P2[3]: "Config. 2B: Fluidez Absoluta (Homofílica, Prop. B)",
+    P2[4]: "Config. 2B: Fluidez Absoluta (Uniforme, Prop. A)"
 }
 
 palette = {
@@ -90,7 +90,7 @@ for rid in [P2[0], P2[1], P2[2]]:
                          np.clip(grp['mean'] + grp['std'].fillna(0), -0.05, 1.0),
                          color=color, alpha=0.15)
 
-ax1.set_title(r"(a) Caso 2A: Hubs Intolerantes ($\tau_{\text{hub}}=0.01$) vs. Periferia ($\tau_{\text{perif}}=0.50$)", fontsize=12, fontweight="bold")
+ax1.set_title(r"(a) Configuración 2A: Hubs Intolerantes ($\tau_{\text{hub}}=0.01$) vs. Periferia ($\tau_{\text{perif}}=0.50$)", fontsize=12, fontweight="bold")
 ax1.set_xlabel(r"Ronda de Simulación $t$", fontsize=11, fontweight="bold")
 ax1.set_ylabel(r"Asortatividad de Opinión Dirigida $r^t$", fontsize=11, fontweight="bold")
 ax1.set_ylim(-0.05, 1.05)  # rerun 2026-10-14: r reaches 1.0 in echo chambers
@@ -113,7 +113,7 @@ for rid in [P2[0], P2[3], P2[4]]:
                          np.clip(grp['mean'] + grp['std'].fillna(0), -0.05, 1.0),
                          color=color, alpha=0.15)
 
-ax2.set_title(r"(b) Caso 2B: Régimen de Fluidez Absoluta ($P_{\text{break}} = 1.0, P_{\text{create}} = 1.0$)", fontsize=12, fontweight="bold")
+ax2.set_title(r"(b) Configuración 2B: Régimen de Fluidez Absoluta ($P_{\text{break}} = 1.0, P_{\text{create}} = 1.0$)", fontsize=12, fontweight="bold")
 ax2.set_xlabel(r"Ronda de Simulación $t$", fontsize=11, fontweight="bold")
 ax2.set_ylabel(r"Asortatividad de Opinión Dirigida $r^t$", fontsize=11, fontweight="bold")
 ax2.set_ylim(-0.05, 1.05)

@@ -48,10 +48,10 @@ conn.close()
 # Map run IDs to scenario labels
 scenario_map = {
     P1[0]: "Línea Base: Uniforme U(0,1) (Prop. B)",
-    P1[1]: "Caso 1A: Polarización Extrema (Homofílica, Prop. B)",
-    P1[2]: "Caso 1A: Polarización Extrema (Uniforme, Prop. A)",
-    P1[3]: "Caso 1B: Minoría Radical (Homofílica, Prop. B)",
-    P1[4]: "Caso 1B: Minoría Radical (Uniforme, Prop. A)"
+    P1[1]: "Config. 1A: Polarización Extrema (Homofílica, Prop. B)",
+    P1[2]: "Config. 1A: Polarización Extrema (Uniforme, Prop. A)",
+    P1[3]: "Config. 1B: Minoría Radical (Homofílica, Prop. B)",
+    P1[4]: "Config. 1B: Minoría Radical (Uniforme, Prop. A)"
 }
 
 df['Scenario'] = df['run_id'].map(scenario_map)
@@ -92,7 +92,7 @@ for rid in [P1[0], P1[2], P1[1]]:
                          np.clip(grp['mean'] + grp['std'].fillna(0), -0.1, 1.05),
                          color=color, alpha=0.15)
 
-ax1.set_title(r"(a) Caso 1A: Polarización Bimodal ($B \in \{0.05, 0.95\}$)", fontsize=12, fontweight="bold")
+ax1.set_title(r"(a) Configuración 1A: Polarización Bimodal ($B \in \{0.05, 0.95\}$)", fontsize=12, fontweight="bold")
 ax1.set_xlabel(r"Ronda de Simulación $t$", fontsize=11, fontweight="bold")
 ax1.set_ylabel(r"Asortatividad de Opinión Dirigida $r^t$", fontsize=11, fontweight="bold")
 ax1.set_ylim(-0.05, 1.05)
@@ -115,7 +115,7 @@ for rid in [P1[0], P1[4], P1[3]]:
                          np.clip(grp['mean'] + grp['std'].fillna(0), -0.1, 1.05),
                          color=color, alpha=0.15)
 
-ax2.set_title(r"(b) Caso 1B: Mayoría Neutral (90%) vs. Minoría Radical (10%)", fontsize=12, fontweight="bold")
+ax2.set_title(r"(b) Configuración 1B: Mayoría Neutral (90%) vs. Minoría Radical (10%)", fontsize=12, fontweight="bold")
 ax2.set_xlabel(r"Ronda de Simulación $t$", fontsize=11, fontweight="bold")
 ax2.set_ylabel(r"Asortatividad de Opinión Dirigida $r^t$", fontsize=11, fontweight="bold")
 ax2.set_ylim(-0.05, 0.65)

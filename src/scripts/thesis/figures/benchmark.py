@@ -45,12 +45,12 @@ for line in lines:
         'AvgRounds': float(parts[-1])
     })
 df_csv = pd.DataFrame(records)
-# Labels as in Table 6.2 of the thesis (the CSV keeps the runner's English scenario names)
+# Labels as in Table E.1 of the thesis (the CSV keeps the runner's English scenario names)
 LABELS = {
-    'Baseline (Static)': 'Baseline (Estática)',
-    'Scenario A (Pure Creation, Prop C)': 'Escenario A (Creación Pura, Prop. C)',
-    'Scenario B (Uniform, Prop A)': 'Escenario B (Uniforme, Prop. A)',
-    'Scenario B (Homophilic, Prop B)': 'Escenario B (Homofílico, Prop. B)',
+    'Baseline (Static)': 'Línea base estática',
+    'Scenario A (Pure Creation, Prop C)': 'Creación pura (Prop. C)',
+    'Scenario B (Uniform, Prop A)': 'Coevolución uniforme (Prop. A)',
+    'Scenario B (Homophilic, Prop B)': 'Coevolución homofílica (Prop. B)',
 }
 
 palette = {

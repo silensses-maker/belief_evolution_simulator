@@ -26,15 +26,15 @@ cur = conn.cursor()
 runs = [P1[0], P1[1], P1[2], P1[3], P1[4], P2[0], P2[1], P2[2], P2[3], P2[4]]
 scenario_names = {
     P1[0]: "Línea Base Uniforme (Prop. B)",
-    P1[1]: "Caso 1A Bimodal (Prop. B - Homofílico)",
-    P1[2]: "Caso 1A Bimodal (Prop. A - Uniforme)",
-    P1[3]: "Caso 1B Radical (Prop. B - Homofílico)",
-    P1[4]: "Caso 1B Radical (Prop. A - Uniforme)",
+    P1[1]: "Config. 1A Bimodal (Prop. B - Homofílico)",
+    P1[2]: "Config. 1A Bimodal (Prop. A - Uniforme)",
+    P1[3]: "Config. 1B Radical (Prop. B - Homofílico)",
+    P1[4]: "Config. 1B Radical (Prop. A - Uniforme)",
     P2[0]: "Línea Base Ref. (tau=0.10, Prop. B)",
-    P2[1]: "Caso 2A Hubs Intol. (Prop. B - Homofílico)",
-    P2[2]: "Caso 2A Hubs Intol. (Prop. A - Uniforme)",
-    P2[3]: "Caso 2B Fluidez Abs. (Prop. B - Homofílico)",
-    P2[4]: "Caso 2B Fluidez Abs. (Prop. A - Uniforme)"
+    P2[1]: "Config. 2A Hubs Intol. (Prop. B - Homofílico)",
+    P2[2]: "Config. 2A Hubs Intol. (Prop. A - Uniforme)",
+    P2[3]: "Config. 2B Fluidez Abs. (Prop. B - Homofílico)",
+    P2[4]: "Config. 2B Fluidez Abs. (Prop. A - Uniforme)"
 }
 
 records = []

@@ -32,18 +32,18 @@ df = pd.read_csv(csv_path)
 
 # Runs 200 and 203 (Prop. A of Cases 1B and 2A) are left out: two of their three networks are the same networks as in
 # runs 199 and 202 (consecutive seeds), with identical results, and the third differs by less than 1%.
-# 196: Línea Base Fase 1    197/198: Caso 1A (Prop. B / A)    199: Caso 1B (Prop. B)
-# 201: Línea Base Fase 2    202: Caso 2A (Prop. B)            204/205: Caso 2B (Prop. B / A)
+# 196: Línea Base Fase 1    197/198: Config. 1A (Prop. B / A)    199: Config. 1B (Prop. B)
+# 201: Línea Base Fase 2    202: Config. 2A (Prop. B)            204/205: Config. 2B (Prop. B / A)
 selected_runs = [P1[0], P1[1], P1[2], P1[3], P2[0], P2[1], P2[3], P2[4]]
 label_map = {
     P1[0]: "Línea Base\nFase 1 (B)",
-    P1[1]: "Caso 1A\nProp. B",
-    P1[2]: "Caso 1A\nProp. A",
-    P1[3]: "Caso 1B\nProp. B",
+    P1[1]: "Config. 1A\nProp. B",
+    P1[2]: "Config. 1A\nProp. A",
+    P1[3]: "Config. 1B\nProp. B",
     P2[0]: "Línea Base\nFase 2 (B)",
-    P2[1]: "Caso 2A\nProp. B",
-    P2[3]: "Caso 2B\nProp. B",
-    P2[4]: "Caso 2B\nProp. A"
+    P2[1]: "Config. 2A\nProp. B",
+    P2[3]: "Config. 2B\nProp. B",
+    P2[4]: "Config. 2B\nProp. A"
 }
 
 df_sub = df[df['run_id'].isin(selected_runs)].copy()

@@ -44,10 +44,10 @@ conn.close()
 # Map run IDs to scenario labels
 scenario_map = {
     P1[0]: "Línea Base\n(Uniforme, Prop. B)",
-    P1[1]: "Caso 1A: Bimodal\n(Homofílico, Prop. B)",
-    P1[2]: "Caso 1A: Bimodal\n(Uniforme, Prop. A)",
-    P1[3]: "Caso 1B: Minoría Rad.\n(Homofílico, Prop. B)",
-    P1[4]: "Caso 1B: Minoría Rad.\n(Uniforme, Prop. A)"
+    P1[1]: "Config. 1A: Bimodal\n(Homofílico, Prop. B)",
+    P1[2]: "Config. 1A: Bimodal\n(Uniforme, Prop. A)",
+    P1[3]: "Config. 1B: Minoría Rad.\n(Homofílico, Prop. B)",
+    P1[4]: "Config. 1B: Minoría Rad.\n(Uniforme, Prop. A)"
 }
 
 df_net['Scenario'] = df_net['run_id'].map(scenario_map)

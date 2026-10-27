@@ -38,3 +38,7 @@ project/plugins/project/
 .context/
 # Thesis replicas (src/scripts/thesis/reproduce.sh); publish a replica under results/<author>/ instead
 results/replica/
+
+# Python bytecode (thesis scripts)
+__pycache__/
+*.py[cod]

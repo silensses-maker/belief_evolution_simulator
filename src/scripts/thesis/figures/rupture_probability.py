@@ -47,7 +47,7 @@ ax1.legend(loc='lower right', fontsize=9, frameon=True)
 ax1.grid(True, linestyle='--', alpha=0.6)
 
 tau = 0.10
-for pb, c, lab in ((1.0, '#8e44ad', r'$P_{\mathrm{break}} = 1$ (casos de estudio, Caso 2B)'),
+for pb, c, lab in ((1.0, '#8e44ad', r'$P_{\mathrm{break}} = 1$ (casos de estudio y Configuración 2B)'),
                    (0.2, '#16a085', r'$P_{\mathrm{break}} = 0.2$ (benchmark)')):
     ax2.plot(d, pb * g(d, tau), color=c, lw=2.6, label=lab)
 ax2.axvline(tau, color='gray', lw=0.8, ls=':')
