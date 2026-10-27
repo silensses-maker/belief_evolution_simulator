@@ -10,12 +10,15 @@ import networkx as nx
 seeds_json, outdir = sys.argv[1], sys.argv[2]
 runs = json.load(open(seeds_json))
 
-I1 = [[0.6, 0.4, 0, 0, 0], [0.4, 0.4, 0.2, 0, 0], [0.1, 0.1, 0.6, 0.1, 0.1], [0, 0, 0.2, 0.4, 0.4], [0, 0, 0, 0.4, 0.6]]
-I2 = [[0.95, 0, 0, 0.05, 0, 0, 0, 0], [0, 0.80, 0, 0.20, 0, 0, 0, 0], [0, 0, 0.90, 0.10, 0, 0, 0, 0],
-      [0.20, 0.10, 0.20, 0, 0.50, 0, 0, 0], [0, 0, 0, 0.25, 0.25, 0.20, 0.10, 0.20], [0, 0, 0, 0, 0.10, 0.90, 0, 0],
-      [0, 0, 0, 0, 0.20, 0, 0.80, 0], [0, 0, 0, 0, 0.05, 0, 0, 0.95]]
-I3 = [[0.30, 0.15, 0.40, 0.15], [0.15, 0.30, 0.15, 0.40], [0.40, 0.15, 0.30, 0.15], [0.15, 0.40, 0.15, 0.30]]
+# Influence graphs of Aranda et al. (ICTAC 2025), Figs. 2, 4 and 3; row = receiver, column = emitter (as CaseStudies.scala).
+I1 = [[0.5, 0.4, 0.1, 0, 0], [0.4, 0.5, 0.1, 0, 0], [0.2, 0.2, 0.2, 0.2, 0.2], [0, 0, 0.1, 0.5, 0.4], [0, 0, 0.1, 0.4, 0.5]]
+I2 = [[0.80, 0, 0, 0.20, 0, 0, 0, 0], [0, 0.80, 0, 0.20, 0, 0, 0, 0], [0, 0, 0.80, 0.20, 0, 0, 0, 0],
+      [0.05, 0.10, 0.10, 0.50, 0.25, 0, 0, 0], [0, 0, 0, 0.50, 0.25, 0.10, 0.10, 0.05], [0, 0, 0, 0, 0.20, 0.80, 0, 0],
+      [0, 0, 0, 0, 0.20, 0, 0.80, 0], [0, 0, 0, 0, 0.20, 0, 0, 0.80]]
+I3 = [[0.10, 0.35, 0.40, 0.15], [0.15, 0.30, 0.40, 0.15], [0.15, 0.40, 0.30, 0.15], [0.15, 0.40, 0.35, 0.10]]
+I4 = [[0.24, 0.40, 0.21, 0.15], [0.32, 0.32, 0.21, 0.15], [0.15, 0.21, 0.32, 0.32], [0.15, 0.21, 0.40, 0.24]]
 B1, B2, B3 = [1.0, 0.8, 0.5, 0.2, 0.0], [0.1, 0.2, 0.15, 1.0, 0.85, 0.25, 0.3, 0.05], [1.0, 0.9, 0.1, 0.0]
+B4 = B3
 
 
 def draw(edges, opinions, silent, title, path, offset=0):
@@ -60,7 +63,7 @@ def final(spec, seed):
 
 
 draw(t0_edges(I1), B1, [False] * 5, 'Caso 1 ($T_0$): grafo fuertemente conexo', os.path.join(outdir, 'Figure_1.png'))
-e, b, s = final('caso1:coev:1.0:1.0:1', 3)
+e, b, s = final('caso1:coev:1.0:1.0:1', 2)
 draw(e, b, s, 'Caso 1 ($T_{final}$): fragmentación estructural', os.path.join(outdir, 'Figure_1_final.png'))
 draw(t0_edges(I2), B2, [False] * 8, 'Caso 2 ($T_0$): minoría vocal asimétrica', os.path.join(outdir, 'Figure_2.png'), offset=1)
 e, b, s = final('caso2:coev:1.0:1.0:1', 1)
@@ -68,3 +71,6 @@ draw(e, b, s, 'Caso 2 ($T_{final}$): absorción de la minoría', os.path.join(ou
 draw(t0_edges(I3), B3, [False] * 4, 'Caso 3 ($T_0$): cliqué (SOM$^+$)', os.path.join(outdir, 'Figure_3.png'))
 e, b, s = final('caso3:coev:1.0:1.0:1', 1)
 draw(e, b, s, 'Caso 3 ($T_{final}$): sub-cliqués con habla reactivada', os.path.join(outdir, 'Figure_3_final.png'))
+draw(t0_edges(I4), B4, [False] * 4, 'Caso 4 ($T_0$): consenso oculto (SOM$^+$)', os.path.join(outdir, 'Figure_4.png'))
+e, b, s = final('caso4:coev:1.0:1.0:1', 1)
+draw(e, b, s, 'Caso 4 ($T_{final}$): el consenso oculto se pierde', os.path.join(outdir, 'Figure_4_final.png'))

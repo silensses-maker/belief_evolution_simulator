@@ -74,7 +74,7 @@ Checked on 2026-10-20 against `promueva_legacy`, network by network (final round
 |---|---|---|
 | 160–163 (benchmark, N = 64), 196, 199–200, 201–205 | uniform or radical minority | **identical** (36 networks, up to 261 632 edges and 200 rounds) |
 | 197–198, 216–218 | bimodal | **different** from the thesis, identical between replicas: see below |
-| Case studies (180 runs) | hand-built | **identical** (`case_studies_results.txt` and every per-round speaking state) |
+| Case studies (180 runs) | hand-built | **identical** (`case_studies_results.txt` and every per-round speaking state); re-run on 2026-10-26 with the ICTAC matrices and the mixed round seed, see `results/puyo/thesis_2026-10/README.md` |
 | Tables and figures | — | `non_consensus_networks.csv` byte-identical; all 17 figures pixel-identical on the platform that drew them (Windows, Python 3.12, matplotlib 3.9.0); the Linux analysis container draws the same data with small text-rendering differences |
 
 The same check inside Docker (`docker-compose.thesis.yml`, JRE 21) on a fresh database: runs 160–163, 172–175 (N = 64

@@ -509,7 +509,10 @@ class Network(networkId: UUID, runMetadata: RunMetadata,
                                 runMetadata.agentsPerNetwork, indexOffset, neighborsRefs, neighborsWeights, neighborBiases,
                                 currentBeliefs, publicBelief, currentSpeaking, hasMemory, coevTolRadius,
                                 config.pBreak, config.pCreate, config.rewiringStrategy,
-                                new scala.util.Random(runMetadata.seed + round) // deterministic per-round seed
+                                // deterministic per-round seed; seed + round is kept for the thesis campaigns 160-218
+                                new scala.util.Random(
+                                    if (config.mixedRoundSeed) core.simulation.topology.CoevolutionEngine.roundSeed(runMetadata.seed, round)
+                                    else runMetadata.seed + round)
                             )
 
                             Array.copy(newOffsets, 0, indexOffset, 0, indexOffset.length)

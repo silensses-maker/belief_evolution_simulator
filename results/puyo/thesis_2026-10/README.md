@@ -15,7 +15,7 @@ PostgreSQL database, under the run ids below.
 | `edge_case_results_phase4.csv` | Resistance to consensus, N = 512: bimodal baseline, ablation P_create = 0, sub-critical τ = 0.02 | 216–218 | campaign `consensus-resistance` (`phase4`) |
 | `parametric_results_no_db_timing.csv` | The benchmark rerun without database persistence, for timing only (new networks) | — | `benchmark` with `APP_SKIP_DATABASE=true`, before run ids were pinned |
 | `non_consensus_networks.csv` | The 32 networks (of 177) that ended without consensus: stop reason, final κ, Φ and r, strongly connected components of the final topology | 160–218 | `src/scripts/thesis/non_consensus.py 160 218` |
-| `case_studies_results.txt` | Final state of the Ch. 5 case studies: three hand-built networks, static and coevolutionary, 20 seeds each | — | `case-studies` (custom-network runs through `Monitor`) |
+| `case_studies_results.txt` | Final state of the Ch. 5 case studies: the influence graphs of Aranda et al. (ICTAC 2025, Figs. 2, 4, 3 and 5; case 4 is the hidden consensus), static and coevolutionary, 20 seeds each; the coevolutionary runs mix seed and round (`mixedRoundSeed`, 2026-10-26) | — | `case-studies` (custom-network runs through `Monitor`) |
 
 The campaigns are defined in `core.simulation.thesis.ThesisCampaigns` and run with
 `core.simulation.thesis.RunThesisCampaign`; [`src/scripts/thesis/README.md`](../../../src/scripts/thesis/README.md)
@@ -58,3 +58,11 @@ silence window is `[−0.05, 0.15]`. Before 2026-10-14 the coevolution hook pass
 as the rupture/creation tolerance τ. The hook now passes `τ = (upper − lower) / 2`. All campaigns above were rerun
 after the fix; the earlier run ids 91–159 are superseded. The case studies (offset 0) gave identical results before
 and after. The asymmetric silence window itself belongs to the original engine and was left unchanged.
+
+On 2026-10-26 the case studies were re-run with two changes. Their influence matrices are now the graphs of Aranda et
+al. (ICTAC 2025, Figs. 2, 4 and 3), whose static runs reproduce the paper's figures; the earlier matrices mixed up
+edge directions. A fourth case reproduces the hidden consensus of Fig. 5. Their coevolutionary runs now seed each round with `CoevolutionEngine.roundSeed(seed, round)`
+(SplitMix64), enabled by `CoevolutionConfig.mixedRoundSeed`. With `seed + round`, `java.util.Random` returns almost the
+same first draw for consecutive seeds (about 0.730 for seeds 1 to 12), so in these small networks the first Bernoulli
+trial of every round was nearly constant across rounds and seeds. The campaigns 160–218 keep `seed + round`; there the
+affected draw is one of thousands per round.

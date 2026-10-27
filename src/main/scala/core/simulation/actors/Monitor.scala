@@ -69,7 +69,8 @@ case class CoevolutionConfig(
     rewiringStrategy: Int,                  // 0 = Proposal A (Uniform), 1 = Proposal B (Homophily)
     assortivityStopThreshold: Float = 1.1f, // >1 = disabled; e.g. 0.95 stops when r^t >= threshold
     fragmentationStop: Boolean = false,     // true = stop as soon as Phi_t > 0 (any SCC split)
-    asymmetricTolerance: Option[(Float, Float, Float)] = None // (hubTol, periphTol, hubFraction)
+    asymmetricTolerance: Option[(Float, Float, Float)] = None, // (hubTol, periphTol, hubFraction)
+    mixedRoundSeed: Boolean = false // true = per-round RNG seeded with CoevolutionEngine.roundSeed; false = seed + round
 )
 
 // Messages

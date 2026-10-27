@@ -10,8 +10,9 @@ import io.web.{CustomRunInfo, SimulationCache}
 import java.io.PrintWriter
 
 /**
- * Chapter 5 case studies: three hand-built networks (exact B^0, tau and I^0 of the thesis), static and
- * coevolutionary, run through the SiLEnSeSS actors without a database. Seed of repetition k = k.
+ * Chapter 5 case studies: four hand-built networks (exact B^0, tau and I^0 of the thesis), static and
+ * coevolutionary, run through the SiLEnSeSS actors without a database. Seed of repetition k = k; the coevolutionary
+ * runs mix seed and round (`CoevolutionConfig.mixedRoundSeed`), so the 20 repetitions are independent.
  *
  * The diagonal of I^0 is the implicit self-influence, as in generated networks; each off-diagonal entry I[i][j] > 0 is
  * an edge receiver i <- emitter j with that weight. A spec is `case:static` or `case:coev:pBreak:pCreate:strategy`.
@@ -23,30 +24,38 @@ object CaseStudies {
 
     private def f(xs: Double*): Array[Float] = xs.map(_.toFloat).toArray
 
+    // Influence graphs of Aranda et al. (ICTAC 2025): Fig. 2 (case 1), Fig. 4 (case 2) and Fig. 3 (case 3). There an
+    // arrow j -> i carries I_ji, the influence of j on i; here it is row i (receiver), column j (emitter).
     val cases: Map[String, Case] = Map(
-        // Case 1 (SOM-): bridge node between two opinion blocks
+        // Case 1 (SOM-): bridge node between two opinion blocks (ICTAC Fig. 2)
         "caso1" -> Case("caso1", f(1.0, 0.8, 0.5, 0.2, 0.0), f(0.2, 0.15, 0.1, 0.15, 0.2), Array(
-            f(0.6, 0.4, 0.0, 0.0, 0.0),
-            f(0.4, 0.4, 0.2, 0.0, 0.0),
-            f(0.1, 0.1, 0.6, 0.1, 0.1),
-            f(0.0, 0.0, 0.2, 0.4, 0.4),
-            f(0.0, 0.0, 0.0, 0.4, 0.6)), memory = false),
-        // Case 2 (SOM-): vocal minority (agents 3 and 4, numbered from 0) over a disconnected moderate majority
+            f(0.5, 0.4, 0.1, 0.0, 0.0),
+            f(0.4, 0.5, 0.1, 0.0, 0.0),
+            f(0.2, 0.2, 0.2, 0.2, 0.2),
+            f(0.0, 0.0, 0.1, 0.5, 0.4),
+            f(0.0, 0.0, 0.1, 0.4, 0.5)), memory = false),
+        // Case 2 (SOM-): vocal minority (agents 3 and 4, numbered from 0) over a disconnected moderate majority (ICTAC Fig. 4)
         "caso2" -> Case("caso2", f(0.1, 0.2, 0.15, 1.0, 0.85, 0.25, 0.3, 0.05), f(0.1, 0.05, 0.1, 0.85, 0.6, 0.05, 0.1, 0.05), Array(
-            f(0.95, 0.00, 0.00, 0.05, 0.00, 0.00, 0.00, 0.00),
+            f(0.80, 0.00, 0.00, 0.20, 0.00, 0.00, 0.00, 0.00),
             f(0.00, 0.80, 0.00, 0.20, 0.00, 0.00, 0.00, 0.00),
-            f(0.00, 0.00, 0.90, 0.10, 0.00, 0.00, 0.00, 0.00),
-            f(0.20, 0.10, 0.20, 0.00, 0.50, 0.00, 0.00, 0.00),
-            f(0.00, 0.00, 0.00, 0.25, 0.25, 0.20, 0.10, 0.20),
-            f(0.00, 0.00, 0.00, 0.00, 0.10, 0.90, 0.00, 0.00),
+            f(0.00, 0.00, 0.80, 0.20, 0.00, 0.00, 0.00, 0.00),
+            f(0.05, 0.10, 0.10, 0.50, 0.25, 0.00, 0.00, 0.00),
+            f(0.00, 0.00, 0.00, 0.50, 0.25, 0.10, 0.10, 0.05),
+            f(0.00, 0.00, 0.00, 0.00, 0.20, 0.80, 0.00, 0.00),
             f(0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.80, 0.00),
-            f(0.00, 0.00, 0.00, 0.00, 0.05, 0.00, 0.00, 0.95)), memory = false),
-        // Case 3 (SOM+): polarized clique with memory
+            f(0.00, 0.00, 0.00, 0.00, 0.20, 0.00, 0.00, 0.80)), memory = false),
+        // Case 3 (SOM+): polarized clique with memory, counter-example to consensus (ICTAC Fig. 3)
         "caso3" -> Case("caso3", f(1.0, 0.9, 0.1, 0.0), f(0.1, 0.1, 0.1, 0.1), Array(
-            f(0.30, 0.15, 0.40, 0.15),
-            f(0.15, 0.30, 0.15, 0.40),
-            f(0.40, 0.15, 0.30, 0.15),
-            f(0.15, 0.40, 0.15, 0.30)), memory = true)
+            f(0.10, 0.35, 0.40, 0.15),
+            f(0.15, 0.30, 0.40, 0.15),
+            f(0.15, 0.40, 0.30, 0.15),
+            f(0.15, 0.40, 0.35, 0.10)), memory = true),
+        // Case 4 (SOM+): hidden consensus, private beliefs converge while everyone is silent (ICTAC Fig. 5)
+        "caso4" -> Case("caso4", f(1.0, 0.9, 0.1, 0.0), f(0.2, 0.1, 0.05, 0.15), Array(
+            f(0.24, 0.40, 0.21, 0.15),
+            f(0.32, 0.32, 0.21, 0.15),
+            f(0.15, 0.21, 0.32, 0.32),
+            f(0.15, 0.21, 0.40, 0.24)), memory = true)
     )
 
     /** The specs and repetitions of the thesis (Sec. 5.1-5.3 and Annex A). */
@@ -55,7 +64,8 @@ object CaseStudies {
         "caso1:static", "caso2:static", "caso3:static",
         "caso1:coev:1.0:1.0:1", "caso1:coev:0.5:0.05:1",
         "caso2:coev:1.0:1.0:1", "caso2:coev:0.5:0.05:1",
-        "caso3:coev:1.0:1.0:1", "caso3:coev:0.5:0.05:1")
+        "caso3:coev:1.0:1.0:1", "caso3:coev:0.5:0.05:1",
+        "caso4:static", "caso4:coev:1.0:1.0:1", "caso4:coev:0.5:0.05:1")
 
     private def runInfo(c: Case, runId: Long, coev: Option[CoevolutionConfig]): CustomRunInfo = {
         val n = c.b0.length
@@ -89,7 +99,8 @@ object CaseStudies {
                 runId += 1
                 val p = spec.split(":")
                 val c = cases.getOrElse(p(0), throw new IllegalArgumentException(s"Unknown case '${p(0)}'"))
-                val coev = if (p(1) == "static") None else Some(CoevolutionConfig(p(2).toFloat, p(3).toFloat, p(4).toInt))
+                val coev = if (p(1) == "static") None
+                    else Some(CoevolutionConfig(p(2).toFloat, p(3).toFloat, p(4).toInt, mixedRoundSeed = true))
                 println(s"\n=== RUN $runId spec=$spec rep=$rep seed=$rep")
                 monitor ! RunCustomNetwork(runInfo(c, runId, coev).copy(seed = rep.toLong))
                 var waited = 0

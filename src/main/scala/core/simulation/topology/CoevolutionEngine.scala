@@ -36,6 +36,24 @@ import scala.util.Random
  */
 object CoevolutionEngine {
 
+    /** SplitMix64 finalizer (Steele, Lea and Flood, 2014). */
+    private def mix64(x: Long): Long = {
+        var z = x + 0x9E3779B97F4A7C15L
+        z = (z ^ (z >>> 30)) * 0xBF58476D1CE4E5B9L
+        z = (z ^ (z >>> 27)) * 0x94D049BB133111EBL
+        z ^ (z >>> 31)
+    }
+
+    /**
+     * Per-round RNG seed that mixes the network seed and the round.
+     *
+     * `java.util.Random` returns almost the same first draw for consecutive seeds (about 0.730 for seeds 1 to 12), so
+     * seeding round t with `seed + t` makes the first Bernoulli trial of every round nearly constant across rounds and
+     * seeds. In small networks, where a round makes only a few draws, that trial decides the outcome. Mixing both
+     * values gives independent first draws. Enabled with `CoevolutionConfig.mixedRoundSeed`.
+     */
+    def roundSeed(seed: Long, round: Int): Long = mix64(mix64(seed) ^ round.toLong)
+
     /**
      * Tolerance radius tau_i for the coevolution rules, recovered from SiLEnSeSS's acceptance window.
      *
@@ -88,7 +106,7 @@ object CoevolutionEngine {
             keptNeighbors.clear()
             newCandidates.clear()
 
-            // --- PHASE 1: FRACTURE (Rupture) ---
+            // --- CONTINUOUS RUPTURE ---
             var j = startIdx
             while (j < endIdx) {
                 val neighborId = neighborsRefs(j)
@@ -123,7 +141,7 @@ object CoevolutionEngine {
                 j += 1
             }
 
-            // --- PHASE 2: BOUNDED CREATION ---
+            // --- BOUNDED CREATION ---
             val beliefI = beliefs(i)
             val tauI = tolRadius(i)
             var k = 0
@@ -139,7 +157,7 @@ object CoevolutionEngine {
                 k += 1
             }
 
-            // --- PHASE 3: REWIRING & INFLUENCE CONSERVATION ---
+            // --- REWIRING & INFLUENCE CONSERVATION ---
             var m = 0
             val startOfNewAgentIdx = newNeighborsRefs.length
             while (m < keptNeighbors.length) {
