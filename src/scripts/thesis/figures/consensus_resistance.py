@@ -66,8 +66,8 @@ def generate_phase4_plots(run_ids, output_dir_thesis, output_dir_notes):
     
     scenario_map = {
         rid_base: r"Línea Base: Bimodal ($\tau=0.20, P_{\mathrm{create}}=0.05$)",
-        rid_ablation: r"Caso A: Ablación ($P_{\mathrm{create}}=0.00, \tau=0.20$)",
-        rid_subcrit: r"Caso B: Sub-Crítica ($\tau=0.02, P_{\mathrm{create}}=0.05$)"
+        rid_ablation: r"Configuración 4A: Ablación ($P_{\mathrm{create}}=0.00, \tau=0.20$)",
+        rid_subcrit: r"Configuración 4B: Sub-Crítica ($\tau=0.02, P_{\mathrm{create}}=0.05$)"
     }
     
     palette = {
@@ -157,8 +157,8 @@ def generate_phase4_plots(run_ids, output_dir_thesis, output_dir_notes):
     grp_net = grp_net.merge(grp_cons, on='run_id')
     grp_net['label'] = grp_net['run_id'].map({
         rid_base: "Línea Base\n(Bimodal, Coev. Activa)",
-        rid_ablation: "Caso A: Ablación $P_{create}=0$\n(Desgaste sin Sanación)",
-        rid_subcrit: "Caso B: Sub-Crítica $\\tau=0.02$\n(Cuello de Botella)"
+        rid_ablation: "Configuración 4A: Ablación $P_{create}=0$\n(Desgaste sin Sanación)",
+        rid_subcrit: "Configuración 4B: Sub-Crítica $\\tau=0.02$\n(Cuello de Botella)"
     })
     
     colors = [palette[rid] for rid in grp_net['run_id']]
