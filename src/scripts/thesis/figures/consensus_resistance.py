@@ -134,7 +134,7 @@ def generate_phase4_plots(run_ids, output_dir_thesis, output_dir_notes):
     ax2.set_ylabel(r"Asortatividad de Opinión $r^t$", fontsize=11, fontweight="bold")
     ax2.set_ylim(-0.05, 1.05)
     ax2.grid(True, linestyle="--", alpha=0.6)
-    ax2.legend(loc="lower right" if df_metrics['assortativity'].iloc[-1] < 0.5 else "center right", frameon=True, fontsize=9.5)
+    ax2.legend(loc="upper right", frameon=True, fontsize=9.5)  # arriba queda libre; al centro tapaba la curva de la ablación
     
     plt.tight_layout()
     
