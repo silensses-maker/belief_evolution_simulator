@@ -118,7 +118,7 @@ ax2.set_xlabel(r"Ronda de Simulación $t$", fontsize=11, fontweight="bold")
 ax2.set_ylabel(r"Asortatividad de Opinión Dirigida $r^t$", fontsize=11, fontweight="bold")
 ax2.set_ylim(-0.05, 1.05)
 ax2.grid(True, linestyle="--", alpha=0.6)
-ax2.legend(loc="upper right", frameon=True, fontsize=9.5)
+ax2.legend(loc="lower right", frameon=True, fontsize=9.5)  # arriba tapaba las curvas que llegan a 1.0
 
 plt.tight_layout()
 

@@ -97,7 +97,7 @@ ax1.set_xlabel(r"Ronda de Simulación $t$", fontsize=11, fontweight="bold")
 ax1.set_ylabel(r"Asortatividad de Opinión Dirigida $r^t$", fontsize=11, fontweight="bold")
 ax1.set_ylim(-0.05, 1.05)
 ax1.grid(True, linestyle="--", alpha=0.6)
-ax1.legend(loc="center right", frameon=True, fontsize=9.5)
+ax1.legend(loc="upper right", frameon=True, fontsize=9.5)  # arriba queda libre
 
 # Panel 2: Case 1B vs Baseline
 for rid in [P1[0], P1[4], P1[3]]:
