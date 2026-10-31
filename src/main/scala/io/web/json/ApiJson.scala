@@ -1,8 +1,8 @@
 package io.web.json
 
-import io.db.DatabaseManager.{GeneratedRunConfig, RunSummary, UsageLimits, UserData}
+import io.db.DatabaseManager.{GeneratedRunConfig, RunSummary, UserData}
 import io.web.{ResultsSnapshot, TopologySnapshot}
-import io.web.auth.AuthenticatedUser
+import io.web.auth.{AuthenticatedUser, Roles, UsageLimits}
 import spray.json.*
 
 import scala.collection.immutable.ListMap
@@ -131,6 +131,43 @@ object ApiJson {
         "uid"    -> JsString(uid),
         "role"   -> JsString(role),
         "action" -> JsString(action)
+    )
+
+    /**
+     * One account as the user administration sees it (`GET /api/users`, `PUT /api/users/{uid}/role`,
+     * `POST /api/users/{uid}/deactivate|reactivate`): the info shape plus `photo`, the effective
+     * role (the one the quotas come from) and the ISO-8601 timestamps.
+     */
+    def adminUser(user: UserData): JsObject = obj(
+        "uid"           -> jsNullable(user.firebaseUid),
+        "email"         -> jsNullable(user.email),
+        "name"          -> jsNullable(user.name),
+        "photo"         -> user.photo.fold[JsValue](JsNull)(JsString(_)),
+        "roles"         -> jsStrings(user.roles),
+        "effectiveRole" -> JsString(Roles.effective(user.roles)),
+        "usageLimits"   -> usageLimits(Roles.usageLimits(user.roles)),
+        "deactivated"   -> JsBoolean(user.deactivated),
+        "createdAt"     -> jsNullable(user.createdAt),
+        "updatedAt"     -> jsNullable(user.updatedAt)
+    )
+
+    /** `GET /api/users`: one page and the total that matches the same filter. */
+    def userList(users: Seq[UserData], total: Int, limit: Int, offset: Int): JsObject = obj(
+        "users"  -> JsArray(users.iterator.map(adminUser).toVector),
+        "total"  -> JsNumber(total),
+        "limit"  -> JsNumber(limit),
+        "offset" -> JsNumber(offset)
+    )
+
+    /** `GET /api/users/roles`: every role, highest priority first, with its quotas. */
+    val roleCatalog: JsObject = obj(
+        "roles" -> JsArray(Roles.all.iterator.map { role =>
+            obj(
+                "role"        -> JsString(role),
+                "priority"    -> JsNumber(Roles.priority(role)),
+                "usageLimits" -> usageLimits(Roles.limitsOf(role))
+            )
+        }.toVector)
     )
 
     // ── /simulations/* ──────────────────────────────────────────────────────

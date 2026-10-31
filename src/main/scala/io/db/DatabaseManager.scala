@@ -11,19 +11,21 @@ import core.simulation.config.*
 import io.persistence.actors.{NeighborStructure, StaticData}
 import io.serialization.binary.Decoder
 import io.web.{CustomAgentsData, CustomNeighborsData}
+import io.web.auth.Roles
+import io.web.users.{UserAdminError, UserAdminStore, UserPage}
 import org.postgresql.copy.CopyManager
 import org.postgresql.core.BaseConnection
 import utils.logging.Logger
 
 import java.io.{ByteArrayInputStream, PrintWriter}
-import java.sql.{Connection, PreparedStatement, Statement}
+import java.sql.{Connection, PreparedStatement, ResultSet, Statement}
 import java.util.UUID
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.mutable
 // The build imports jdk.incubator.vector.* everywhere (-Yimports): use Scala's Vector here.
 import scala.collection.immutable.Vector
 
-object DatabaseManager {
+object DatabaseManager extends UserAdminStore {
     // ============================================================================
     // DATABASE CONNECTION CONFIGURATION
     // ============================================================================
@@ -394,25 +396,15 @@ object DatabaseManager {
         updatedAt: String
     )
 
-    /**
-     * Per-role quotas. `Int.MaxValue` means unlimited and is serialized as `null`.
-     * `maxNetworks` caps `numberOfNetworks` of generated runs (custom runs are always 1 network).
-     */
-    case class UsageLimits(maxAgents: Int, maxIterations: Int, densityFactor: Double, maxNetworks: Int)
+    /** The per-role quotas now live with the roles ([[io.web.auth.UsageLimits]]); alias kept for callers. */
+    type UsageLimits = io.web.auth.UsageLimits
 
-    private val ROLE_PRIORITY: Map[String, Int] = Map(
-        "Administrator" -> 3, "Researcher" -> 2, "BaseUser" -> 1, "Guest" -> 0
-    )
+    /** Quotas of the highest-priority role (`Roles.usageLimits`). */
+    def getUsageLimits(roles: Seq[String]): UsageLimits = Roles.usageLimits(roles)
 
-    def getUsageLimits(roles: Seq[String]): UsageLimits = {
-        val top = roles.maxByOption(ROLE_PRIORITY.getOrElse(_, 0)).getOrElse("Guest")
-        top match {
-            case "Administrator" => UsageLimits(Int.MaxValue, Int.MaxValue, 1.0, Int.MaxValue)
-            case "Researcher"    => UsageLimits(1000, 1000, 0.75, 20)
-            case "BaseUser"      => UsageLimits(100, 100, 0.5, 5)
-            case _               => UsageLimits(10, 10, 0.5, 1)
-        }
-    }
+    /** `created_at` / `updated_at` (timestamptz) as ISO-8601 UTC, like the run summaries. */
+    private def isoTimestamp(rs: ResultSet, column: String): String =
+        rs.getTimestamp(column).toInstant.toString
 
     def createOrUpdateUser(firebaseUid: String, email: String, name: String,
                            photo: Option[String]): Option[UserData] = {
@@ -442,7 +434,7 @@ object DatabaseManager {
             val rs = stmt.executeQuery()
             if (rs.next()) {
                 val userId = rs.getInt("id")
-                ensureHasRole(connection, userId, "Guest")
+                ensureHasRole(connection, userId, Roles.Guest)
                 val roles = loadUserRoles(userId, connection)
                 Some(UserData(
                     id          = userId,
@@ -452,8 +444,8 @@ object DatabaseManager {
                     photo       = Option(rs.getString("photo")),
                     roles       = roles,
                     deactivated = rs.getBoolean("deactivated"),
-                    createdAt   = rs.getTimestamp("created_at").toString,
-                    updatedAt   = rs.getTimestamp("updated_at").toString
+                    createdAt   = isoTimestamp(rs, "created_at"),
+                    updatedAt   = isoTimestamp(rs, "updated_at")
                 ))
             } else None
         } catch {
@@ -465,46 +457,149 @@ object DatabaseManager {
         }
     }
 
+    /** The columns of [[userFromRow]]: one row per account with its roles aggregated. */
+    private val userSelect =
+        """
+          SELECT u.id, u.firebase_uid, u.email, u.name, u.photo,
+                 u.deactivated, u.created_at, u.updated_at,
+                 COALESCE(
+                     array_agg(r.role::text) FILTER (WHERE r.role IS NOT NULL),
+                     '{}'::text[]
+                 ) AS roles
+          FROM users u
+          LEFT JOIN user_roles r ON r.user_id = u.id
+        """
+
+    private def userFromRow(rs: ResultSet): UserData = {
+        val rolesArr = rs.getArray("roles")
+        val roles = if (rolesArr != null)
+            rolesArr.getArray.asInstanceOf[Array[Object]].map(_.toString).toSeq
+        else Seq(Roles.Guest)
+        UserData(
+            id          = rs.getInt("id"),
+            firebaseUid = rs.getString("firebase_uid"),
+            email       = rs.getString("email"),
+            name        = rs.getString("name"),
+            photo       = Option(rs.getString("photo")),
+            roles       = roles,
+            deactivated = rs.getBoolean("deactivated"),
+            createdAt   = isoTimestamp(rs, "created_at"),
+            updatedAt   = isoTimestamp(rs, "updated_at")
+        )
+    }
+
+    private def loadUser(connection: Connection, firebaseUid: String): Option[UserData] = {
+        val stmt = connection.prepareStatement(userSelect + " WHERE u.firebase_uid = ? GROUP BY u.id")
+        stmt.setString(1, firebaseUid)
+        val rs = stmt.executeQuery()
+        if (rs.next()) Some(userFromRow(rs)) else None
+    }
+
     def getUserByFirebaseUid(firebaseUid: String): Option[UserData] = {
         val connection = getConnection
-        try {
-            val sql =
-                """
-                  SELECT u.id, u.firebase_uid, u.email, u.name, u.photo,
-                         u.deactivated, u.created_at, u.updated_at,
-                         COALESCE(
-                             array_agg(r.role::text) FILTER (WHERE r.role IS NOT NULL),
-                             '{}'::text[]
-                         ) AS roles
-                  FROM users u
-                  LEFT JOIN user_roles r ON r.user_id = u.id
-                  WHERE u.firebase_uid = ?
-                  GROUP BY u.id
-                """
-            val stmt = connection.prepareStatement(sql)
-            stmt.setString(1, firebaseUid)
-            val rs = stmt.executeQuery()
-            if (rs.next()) {
-                val rolesArr = rs.getArray("roles")
-                val roles = if (rolesArr != null)
-                    rolesArr.getArray.asInstanceOf[Array[Object]].map(_.toString).toSeq
-                else Seq("Guest")
-                Some(UserData(
-                    id          = rs.getInt("id"),
-                    firebaseUid = rs.getString("firebase_uid"),
-                    email       = rs.getString("email"),
-                    name        = rs.getString("name"),
-                    photo       = Option(rs.getString("photo")),
-                    roles       = roles,
-                    deactivated = rs.getBoolean("deactivated"),
-                    createdAt   = rs.getTimestamp("created_at").toString,
-                    updatedAt   = rs.getTimestamp("updated_at").toString
-                ))
-            } else None
-        } catch {
+        try loadUser(connection, firebaseUid)
+        catch {
             case ex: Exception =>
                 Logger.logError(s"Error getting user: ${ex.getMessage}")
                 None
+        } finally {
+            connection.close()
+        }
+    }
+
+    // ── User administration (UserAdminStore, migration 007) ─────────────────────────────────
+
+    /** `\`, `%` and `_` of a search text escaped for `LIKE` (backslash is Postgres' default escape). */
+    private def escapeLike(text: String): String =
+        text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    /**
+     * One page of accounts, newest first (`created_at`, then id, so the order is total), with the
+     * total of accounts that match `query` (case-insensitive substring of the email or the name;
+     * empty = every account).
+     */
+    def listUsers(limit: Int, offset: Int, query: String): Either[UserAdminError, UserPage] = {
+        val connection = getConnection
+        try {
+            val pattern = Option.when(query.nonEmpty)("%" + escapeLike(query) + "%")
+            val where   = pattern.fold("")(_ => " WHERE u.email ILIKE ? OR u.name ILIKE ?")
+            def bindPattern(stmt: PreparedStatement): Int = pattern match {
+                case Some(p) => stmt.setString(1, p); stmt.setString(2, p); 3
+                case None    => 1
+            }
+
+            val countStmt = connection.prepareStatement("SELECT count(*) FROM users u" + where)
+            bindPattern(countStmt)
+            val countRs = countStmt.executeQuery()
+            val total   = if (countRs.next()) countRs.getInt(1) else 0
+
+            val pageStmt = connection.prepareStatement(
+                userSelect + where + " GROUP BY u.id ORDER BY u.created_at DESC, u.id DESC LIMIT ? OFFSET ?")
+            val next = bindPattern(pageStmt)
+            pageStmt.setInt(next, limit)
+            pageStmt.setInt(next + 1, offset)
+            val rs    = pageStmt.executeQuery()
+            val users = mutable.ArrayBuffer[UserData]()
+            while (rs.next()) users += userFromRow(rs)
+            Right(UserPage(users.toSeq, total))
+        } catch {
+            case ex: Exception =>
+                Logger.logError(s"Error listing users: ${ex.getMessage}")
+                Left(UserAdminError.Failure(ex.getMessage))
+        } finally {
+            connection.close()
+        }
+    }
+
+    /**
+     * Replaces the account's roles with `{Guest, role}` in one transaction (the row is locked so
+     * two administrators cannot interleave) and returns the account as stored.
+     */
+    def setUserRole(firebaseUid: String, role: String): Either[UserAdminError, UserData] = {
+        val connection = getConnection
+        try {
+            connection.setAutoCommit(false)
+            val idStmt = connection.prepareStatement("SELECT id FROM users WHERE firebase_uid = ? FOR UPDATE")
+            idStmt.setString(1, firebaseUid)
+            val idRs = idStmt.executeQuery()
+            if (!idRs.next()) {
+                connection.rollback()
+                Left(UserAdminError.NotFound)
+            } else {
+                val userId  = idRs.getInt(1)
+                val delete  = connection.prepareStatement("DELETE FROM user_roles WHERE user_id = ?")
+                delete.setInt(1, userId)
+                delete.executeUpdate()
+                ensureHasRole(connection, userId, Roles.Guest)
+                if (role != Roles.Guest) ensureHasRole(connection, userId, role)
+                connection.commit()
+                loadUser(connection, firebaseUid).toRight(UserAdminError.NotFound)
+            }
+        } catch {
+            case ex: Exception =>
+                try connection.rollback() catch { case _: Exception => () }
+                Logger.logError(s"Error setting role of $firebaseUid: ${ex.getMessage}")
+                Left(UserAdminError.Failure(ex.getMessage))
+        } finally {
+            try connection.setAutoCommit(true) catch { case _: Exception => () }
+            connection.close()
+        }
+    }
+
+    /** `users.deactivated = deactivated` (idempotent) and the account as stored. */
+    def setUserDeactivated(firebaseUid: String, deactivated: Boolean): Either[UserAdminError, UserData] = {
+        val connection = getConnection
+        try {
+            val stmt = connection.prepareStatement(
+                "UPDATE users SET deactivated = ?, updated_at = CURRENT_TIMESTAMP WHERE firebase_uid = ?")
+            stmt.setBoolean(1, deactivated)
+            stmt.setString(2, firebaseUid)
+            if (stmt.executeUpdate() == 0) Left(UserAdminError.NotFound)
+            else loadUser(connection, firebaseUid).toRight(UserAdminError.NotFound)
+        } catch {
+            case ex: Exception =>
+                Logger.logError(s"Error updating deactivated of $firebaseUid: ${ex.getMessage}")
+                Left(UserAdminError.Failure(ex.getMessage))
         } finally {
             connection.close()
         }

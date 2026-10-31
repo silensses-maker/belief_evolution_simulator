@@ -45,6 +45,9 @@ services:
       SERVER_PORT: "9000"
       GOOGLE_APPLICATION_CREDENTIALS: /secrets/firebase-sa.json
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID}
+      # SOLO desarrollo: host:puerto del emulador de Firebase Auth (sin http://), p.ej.
+      # host.docker.internal:9099. Vacío = Firebase Auth real. NUNCA en producción.
+      FIREBASE_AUTH_EMULATOR_HOST: ${FIREBASE_AUTH_EMULATOR_HOST:-}
       BOOTSTRAP_ADMIN_EMAILS: ${BOOTSTRAP_ADMIN_EMAILS}
       APP_SKIP_DATABASE: ${APP_SKIP_DATABASE}
       APP_SERVER_MODE: ${APP_SERVER_MODE}

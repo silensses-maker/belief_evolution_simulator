@@ -25,11 +25,12 @@ import core.simulation.config.SaveModes.SaveMode
 import utils.logging.Logger
 import io.db.DatabaseManager
 import io.web.auth.ErrorResponses.*
-import io.web.auth.{FieldIssue, TokenVerifier}
-import io.web.auth.FirebaseAuthDirective.{authenticate, requireAdmin}
+import io.web.auth.{FieldIssue, Roles, TokenVerifier}
+import io.web.auth.FirebaseAuthDirective.{authenticate, requireAdmin, requireSuperAdmin}
 import io.web.json.ApiJson
 import io.web.ws.WsEvents
 import io.web.polarization.{PolarizationRoutes, PolarizationService, PolarizationSettings}
+import io.web.users.UserAdminRoutes
 import utils.datastructures.SnowflakeID
 import utils.rng.distributions.Uniform
 import spray.json.*
@@ -376,12 +377,13 @@ object Server {
                         }
                     }
                 } ~
-                // PUT /api/users/role/{uid}/{role} — admin only
+                // PUT /api/users/role/{uid}/{role} — SuperAdministrator only (migration 007; it used
+                // to be Administrator). ADDS a role and keeps the others; the user administration
+                // (`PUT /api/users/{uid}/role` below) replaces them, which is what a client wants.
                 path("role" / Segment / Segment) { (targetUid, newRole) =>
                     put {
-                        requireAdmin { _ =>
-                            val validRoles = Set("Administrator", "Researcher", "BaseUser", "Guest")
-                            if (!validRoles.contains(newRole)) {
+                        requireSuperAdmin { _ =>
+                            if (!Roles.isValid(newRole)) {
                                 complete(StatusCodes.BadRequest ->
                                     errorJson("invalid_body", s"Invalid role: $newRole"))
                             } else if (DatabaseManager.addUserRole(targetUid, newRole)) {
@@ -392,7 +394,11 @@ object Server {
                             }
                         }
                     }
-                }
+                } ~
+                // GET /api/users, GET /api/users/roles, PUT /api/users/{uid}/role,
+                // POST /api/users/{uid}/deactivate|reactivate — user administration (migration 007).
+                // After the routes above: `me/deactivate` must keep answering to the caller.
+                UserAdminRoutes(authenticate, DatabaseManager)
             }
         }
         
