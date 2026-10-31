@@ -236,6 +236,61 @@ class ApiJsonSuite extends munit.FunSuite {
         assertEquals(field(parseAsClient(ApiJson.userInfo(nullColumns, roleLimits(3)).compactPrint), "email"), JsNull)
     }
 
+    test("adminUser: the info members plus photo, effectiveRole and ISO timestamps; hostile values round-trip") {
+        nastyStrings.foreach { s =>
+            val user = new DatabaseManager.UserData(1, s"uid$s", s"$s@x.io", s, Some(s"https://p/$s"),
+                Seq("Guest", "Researcher", s), deactivated = false, createdAt = "2026-10-31T10:00:00Z", updatedAt = "2026-10-31T11:00:00Z")
+            val built  = ApiJson.adminUser(user)
+            val parsed = parseAsClient(built.compactPrint)
+            assertEquals(built.fields.keys.toList, List("uid", "email", "name", "photo", "roles", "effectiveRole",
+                "usageLimits", "deactivated", "createdAt", "updatedAt")) // the printed order
+            assertEquals(memberNames(parsed).toSet, built.fields.keySet)
+            assertEquals(str(parsed, "uid"), s"uid$s")
+            assertEquals(str(parsed, "name"), s)
+            assertEquals(str(parsed, "photo"), s"https://p/$s")
+            assertEquals(array(parsed, "roles"), Vector(JsString("Guest"), JsString("Researcher"), JsString(s)))
+            assertEquals(str(parsed, "effectiveRole"), "Researcher") // the unknown role is ignored
+            assertEquals(field(parsed, "usageLimits"), legacyUsageLimitsJson(roleLimits(1)).parseJson)
+            assertEquals(str(parsed, "createdAt"), "2026-10-31T10:00:00Z")
+        }
+        val superAdmin = new DatabaseManager.UserData(2, "u2", "s@x.io", "S", None, Seq("Guest", "SuperAdministrator"), true, "c", "u")
+        val printed = ApiJson.adminUser(superAdmin).compactPrint
+        assertEquals(printed,
+            s"""{"uid":"u2","email":"s@x.io","name":"S","photo":null,"roles":["Guest","SuperAdministrator"],"effectiveRole":"SuperAdministrator","usageLimits":${legacyUsageLimitsJson(roleLimits.head)},"deactivated":true,"createdAt":"c","updatedAt":"u"}""")
+        val nullColumns = new DatabaseManager.UserData(3, "u3", null, null, None, Seq.empty, false, null, null)
+        val parsedNulls = parseAsClient(ApiJson.adminUser(nullColumns).compactPrint)
+        assertEquals(field(parsedNulls, "email"), JsNull)
+        assertEquals(str(parsedNulls, "effectiveRole"), "Guest")
+        assertEquals(field(parsedNulls, "createdAt"), JsNull)
+    }
+
+    test("userList and roleCatalog shapes") {
+        val users = Seq(
+            new DatabaseManager.UserData(1, "u1", "a@x.io", "A", None, Seq("Guest"), false, "c", "u"),
+            new DatabaseManager.UserData(2, "u2", "b@x.io", "B", None, Seq("Guest", "Administrator"), false, "c", "u"))
+        val builtList = ApiJson.userList(users, 42, 2, 4)
+        val list = parseAsClient(builtList.compactPrint)
+        assertEquals(builtList.fields.keys.toList, List("users", "total", "limit", "offset"))
+        assertEquals(memberNames(list).toSet, Set("users", "total", "limit", "offset"))
+        assertEquals(array(list, "users").map(str(_, "uid")), Vector("u1", "u2"))
+        assertEquals(int(list, "total"), 42)
+        assertEquals(int(list, "limit"), 2)
+        assertEquals(int(list, "offset"), 4)
+        assertEquals(array(parseAsClient(ApiJson.userList(Nil, 0, 50, 0).compactPrint), "users"), Vector.empty)
+
+        val catalog = parseAsClient(ApiJson.roleCatalog.compactPrint)
+        val roles = array(catalog, "roles")
+        assertEquals(roles.map(str(_, "role")), Vector("SuperAdministrator", "Administrator", "Researcher", "BaseUser", "Guest"))
+        assertEquals(roles.map(int(_, "priority")), Vector(4, 3, 2, 1, 0))
+        assertEquals(roles.map(memberNames(_).toSet), Vector.fill(5)(Set("role", "priority", "usageLimits")))
+        assert(ApiJson.roleCatalog.compactPrint.startsWith("""{"roles":[{"role":"SuperAdministrator","priority":4,"usageLimits":{"""))
+        assertEquals(field(roles(0), "usageLimits"), legacyUsageLimitsJson(roleLimits.head).parseJson)
+        assertEquals(field(roles(1), "usageLimits"), legacyUsageLimitsJson(roleLimits.head).parseJson)
+        assertEquals(field(roles(2), "usageLimits"), legacyUsageLimitsJson(roleLimits(1)).parseJson)
+        assertEquals(field(roles(3), "usageLimits"), legacyUsageLimitsJson(roleLimits(2)).parseJson)
+        assertEquals(field(roles(4), "usageLimits"), legacyUsageLimitsJson(roleLimits(3)).parseJson)
+    }
+
     test("roleAction: uid and role come from the URL path and are escaped") {
         nastyStrings.foreach { s =>
             val parsed = parseAsClient(ApiJson.roleAction(s, s"r$s", "added").compactPrint)

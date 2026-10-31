@@ -128,9 +128,11 @@ GOOGLE_APPLICATION_CREDENTIALS=/secrets/firebase-sa.json
 # Your Firebase project ID (Firebase Console → Project Settings → General)
 FIREBASE_PROJECT_ID=<your-firebase-project-id>
 
-# ── Bootstrap admin ───────────────────────────────────────────────────────────
-# Comma-separated list of emails that get the Administrator role automatically
-# on first login. Add at least your own email here.
+# ── Bootstrap super administrator ─────────────────────────────────────────────
+# Comma-separated list of emails that get the SuperAdministrator role automatically
+# on their first authenticated request (it used to be Administrator; the roles an
+# account already holds are kept). Add at least your own email here: only a
+# SuperAdministrator can manage the other accounts (roles, deactivation).
 BOOTSTRAP_ADMIN_EMAILS=<your-email@domain.com>
 
 # ── Firebase service account on the HOST machine ──────────────────────────────
@@ -178,7 +180,7 @@ Migrations run **automatically** on every startup. The init script applies:
 
 No manual step is needed.
 
-### 6. Create the first admin user
+### 6. Create the first super administrator
 
 The server uses Firebase Authentication for all protected endpoints. To get an ID token:
 
@@ -186,7 +188,7 @@ The server uses Firebase Authentication for all protected endpoints. To get an I
 2. Create a user in **Firebase Console → Authentication → Users**, or register via the Firebase client SDK.
 3. Obtain an ID token for that user (see [Firebase REST API](https://firebase.google.com/docs/reference/rest/auth#section-sign-in-email-password) or use the Firebase JS/Android/iOS SDK).
 
-Once you have the token, call `POST /api/users/sync` — this registers the user in the local DB and, if the email is in `BOOTSTRAP_ADMIN_EMAILS`, automatically grants the **Administrator** role:
+Once you have the token, call `POST /api/users/sync` — this registers the user in the local DB and, if the email is in `BOOTSTRAP_ADMIN_EMAILS`, automatically grants the **SuperAdministrator** role (any authenticated request does; `sync` is just the first one a client makes):
 
 ```bash
 TOKEN="<firebase-id-token>"
@@ -195,6 +197,36 @@ curl -s -X POST http://localhost:9000/api/users/sync \
 ```
 
 You only need to do this once per user. Subsequent logins auto-upsert the user record.
+
+### 6b. Roles and user administration
+
+An account holds a set of roles (every account has `Guest`); its effective role is the one with
+the highest priority and decides its quotas (`maxAgents`, `maxIterations`, `maxNetworks`,
+`densityFactor`):
+
+| Role | Priority | Quotas | Can |
+|---|---|---|---|
+| `SuperAdministrator` | 4 | unlimited | everything an Administrator can, plus managing the other accounts |
+| `Administrator` | 3 | unlimited | persistent frames, every run, other users' info |
+| `Researcher` | 2 | 1000 agents, 1000 iterations, 20 networks, density 0.75 | |
+| `BaseUser` | 1 | 100 / 100 / 5 / 0.5 | |
+| `Guest` | 0 | 10 / 10 / 1 / 0.5 | |
+
+Only a SuperAdministrator manages accounts, and the frontend has a view for it (settings menu →
+*Users*). The endpoints behind it:
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/users?limit&offset&q` | one page of every account (newest first), with roles, effective role, quotas and `deactivated`; `q` filters by email or name |
+| `GET /api/users/roles` | the role catalog with the quotas of each role (any authenticated account) |
+| `PUT /api/users/{uid}/role` `{"role": "Researcher"}` | replaces the account's roles with `{Guest, role}`; not on your own uid |
+| `POST /api/users/{uid}/deactivate` | the account gets `401 Account is deactivated` on its next call; not on your own uid (`POST /api/users/me/deactivate` is the self-service way) |
+| `POST /api/users/{uid}/reactivate` | undoes it |
+
+The older `PUT /api/users/role/{uid}/{role}` still exists (SuperAdministrator only now) but only
+*adds* a role. The role list is the Postgres enum `public.user_role` (`db/init/migrations/002`,
+`SuperAdministrator` added by `007`); the priorities and quotas live in
+`src/main/scala/io/web/auth/Roles.scala`.
 
 ### 7. Explore the API
 

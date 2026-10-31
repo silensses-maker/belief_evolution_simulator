@@ -7,10 +7,19 @@ info:
 
     All protected endpoints require `Authorization: Bearer <Firebase idToken>`.
 
-    **Deactivated accounts** (`POST /api/users/me/deactivate`) get
+    **Roles.** An account holds a set of roles (every account has `Guest`); its effective role is
+    the one with the highest priority and decides its quotas (`UsageLimits`):
+    `SuperAdministrator` (4) > `Administrator` (3) > `Researcher` (2) > `BaseUser` (1) > `Guest` (0).
+    A SuperAdministrator can do everything an Administrator can, and is the only role that
+    manages the other accounts (`GET /api/users`, `PUT /api/users/{uid}/role`,
+    `POST /api/users/{uid}/deactivate|reactivate`); the accounts listed in `BOOTSTRAP_ADMIN_EMAILS`
+    are promoted to it on their first authenticated request.
+
+    **Deactivated accounts** (`POST /api/users/me/deactivate`, or a SuperAdministrator's
+    `POST /api/users/{uid}/deactivate`) get
     `401 {"error": "unauthorized", "message": "Account is deactivated"}` on every protected REST
-    endpoint, `/api/users/sync` and `/api/users/info/{uid}` included. Reactivation has no
-    endpoint: an administrator sets `users.deactivated = false` in the database.
+    endpoint, `/api/users/sync` and `/api/users/info/{uid}` included, until a SuperAdministrator
+    calls `POST /api/users/{uid}/reactivate`.
 
     **Errors (#123).** Every non-2xx JSON answer has the body
     `{"error": "<code>", "message": "<text>"}` (schema `Error`), plus `fields` on some
@@ -25,7 +34,7 @@ info:
     | 400 | `bad_request` | any other malformed request, e.g. `GET /ws` without a WebSocket upgrade |
     | 401 | `unauthorized` | missing, invalid or expired token; deactivated account (`Account is deactivated`) |
     | 401 | `token_revoked` | valid signature, but the session was revoked or the Firebase account is disabled or deleted: sign in again |
-    | 403 | `forbidden` | not the owner / not an Administrator |
+    | 403 | `forbidden` | not the owner / not an Administrator / not a SuperAdministrator (user administration) |
     | 404 | `not_found` | unknown path (any method) or unknown resource |
     | 405 | `method_not_allowed` | known path, other method; the `Allow` header lists the methods |
     | 406 | `not_acceptable` | the `Accept` header excludes every representation |
@@ -271,6 +280,10 @@ components:
         | BaseUser | 100 | 100 | 5 | 0.5 |
         | Researcher | 1000 | 1000 | 20 | 0.75 |
         | Administrator | null | null | null | 1.0 |
+        | SuperAdministrator | null | null | null | 1.0 |
+
+        The quotas of an account are those of its effective (highest-priority) role; see
+        `GET /api/users/roles` for the catalog.
       properties:
         maxAgents:
           type: integer
@@ -302,12 +315,97 @@ components:
         roles:
           type: array
           items:
-            type: string
-            enum: [Administrator, Researcher, BaseUser, Guest]
+            $ref: '#/components/schemas/UserRole'
         usageLimits:
           $ref: '#/components/schemas/UsageLimits'
         deactivated:
           type: boolean
+
+    UserRole:
+      type: string
+      description: |
+        A role of the `user_roles` table (Postgres enum `user_role`), highest priority first.
+        Every account holds `Guest`; the effective role is the highest one it holds.
+      enum: [SuperAdministrator, Administrator, Researcher, BaseUser, Guest]
+
+    AdminUser:
+      type: object
+      description: |
+        One account as the user administration sees it (`GET /api/users`,
+        `PUT /api/users/{uid}/role`, `POST /api/users/{uid}/deactivate|reactivate`): the `UserInfo`
+        members plus `photo`, `effectiveRole` (the role the quotas come from) and the ISO-8601 UTC
+        timestamps of the row.
+      required: [uid, email, name, photo, roles, effectiveRole, usageLimits, deactivated, createdAt, updatedAt]
+      properties:
+        uid:
+          type: string
+          description: Firebase uid.
+        email:
+          type: string
+        name:
+          type: string
+        photo:
+          type: string
+          nullable: true
+        roles:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserRole'
+        effectiveRole:
+          $ref: '#/components/schemas/UserRole'
+        usageLimits:
+          $ref: '#/components/schemas/UsageLimits'
+        deactivated:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-10-31T10:00:00Z"
+        updatedAt:
+          type: string
+          format: date-time
+
+    UserList:
+      type: object
+      required: [users, total, limit, offset]
+      properties:
+        users:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminUser'
+        total:
+          type: integer
+          description: Accounts that match the same `q` filter (every account without `q`).
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    RoleCatalog:
+      type: object
+      required: [roles]
+      properties:
+        roles:
+          type: array
+          description: Every role, highest priority first.
+          items:
+            type: object
+            required: [role, priority, usageLimits]
+            properties:
+              role:
+                $ref: '#/components/schemas/UserRole'
+              priority:
+                type: integer
+                example: 4
+              usageLimits:
+                $ref: '#/components/schemas/UsageLimits'
+
+    SetRoleRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          $ref: '#/components/schemas/UserRole'
 
     RunSummary:
       type: object
@@ -945,8 +1043,10 @@ paths:
       tags: [Users]
       summary: Sync authenticated user to DB
       description: |
-        Creates or updates the user record from the Firebase token.
-        Automatically promotes to Administrator if the email is in `BOOTSTRAP_ADMIN_EMAILS`.
+        Creates or updates the user record from the Firebase token (every authenticated request
+        does the same). If the email is in `BOOTSTRAP_ADMIN_EMAILS` the account is promoted to
+        `SuperAdministrator` on its first authenticated request (the roles it already holds are
+        kept).
       responses:
         '200':
           description: User info with roles and usage limits
@@ -961,7 +1061,7 @@ paths:
     get:
       tags: [Users]
       summary: Get user info
-      description: Owner or Administrator only.
+      description: Owner, Administrator or SuperAdministrator only.
       parameters:
         - name: uid
           in: path
@@ -1001,8 +1101,8 @@ paths:
 
         From then on every protected REST call of the account (this one included) is rejected
         with `401 {"error": "unauthorized", "message": "Account is deactivated"}`; the Firebase
-        account itself is untouched. Reactivation has no endpoint: an administrator sets
-        `users.deactivated = false` in the database.
+        account itself is untouched. A SuperAdministrator reactivates the account with
+        `POST /api/users/{uid}/reactivate`.
       responses:
         '200':
           description: Account deactivated
@@ -1030,8 +1130,12 @@ paths:
   /api/users/role/{uid}/{role}:
     put:
       tags: [Users]
-      summary: Add role to user
-      description: Administrator only.
+      summary: Add a role to a user (additive; superseded by PUT /api/users/{uid}/role)
+      description: |
+        SuperAdministrator only (it used to be Administrator only). ADDS `role` to the account and
+        keeps the roles it already holds, so it cannot demote anybody; a client that sets "the"
+        role of an account uses `PUT /api/users/{uid}/role`, which replaces them. Answers `200`
+        even for an unknown uid (nothing is inserted).
       parameters:
         - name: uid
           in: path
@@ -1042,8 +1146,7 @@ paths:
           in: path
           required: true
           schema:
-            type: string
-            enum: [Administrator, Researcher, BaseUser, Guest]
+            $ref: '#/components/schemas/UserRole'
       responses:
         '200':
           description: Role added
@@ -1069,6 +1172,208 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ── User administration (SuperAdministrator) ───────────────────────────────
+
+  /api/users:
+    get:
+      tags: [Users]
+      summary: List accounts (SuperAdministrator)
+      description: |
+        One page of every account, newest first (`createdAt`, then id), each with its roles,
+        effective role, quotas and `deactivated` flag. `q` keeps the accounts whose email or name
+        contains it (case-insensitive; `%`, `_` and `\` are literal). `total` counts the accounts
+        that match the same filter.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: q
+          in: query
+          description: Substring of the email or the name, trimmed; at most 256 characters.
+          schema:
+            type: string
+            maxLength: 256
+      responses:
+        '200':
+          description: The page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserList'
+        '400':
+          description: "`invalid_body` — `limit` out of `[1, 200]`, `offset` negative, `q` too long or a malformed parameter; `fields` names it."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: "`forbidden` — SuperAdministrator role required."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: forbidden
+                message: SuperAdministrator role required
+
+  /api/users/roles:
+    get:
+      tags: [Users]
+      summary: Role catalog
+      description: |
+        Every role, highest priority first, with its quotas — what a client offers in a role
+        selector and shows as a legend. Any authenticated account.
+      responses:
+        '200':
+          description: The catalog
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoleCatalog'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/users/{uid}/role:
+    put:
+      tags: [Users]
+      summary: Set the role of an account (SuperAdministrator)
+      description: |
+        Replaces the account's roles with `{Guest, role}` (`{Guest}` for `Guest`) in one
+        transaction and answers the account as stored. The caller cannot change its own role
+        (`403`): another SuperAdministrator can. Granting `SuperAdministrator` lets that account
+        manage every role too.
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetRoleRequest'
+            example:
+              role: Researcher
+      responses:
+        '200':
+          description: The account with its new roles and quotas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+        '400':
+          description: "`invalid_body` — `role` missing, not a string or not one of the catalog (`fields: [{\"field\": \"role\", ...}]`), or the body is not JSON."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: "`forbidden` — SuperAdministrator role required, or `uid` is the caller's own."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                role:
+                  value:
+                    error: forbidden
+                    message: SuperAdministrator role required
+                self:
+                  value:
+                    error: forbidden
+                    message: Cannot change your own role
+        '404':
+          description: "`not_found` — no account with that uid."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/users/{uid}/deactivate:
+    post:
+      tags: [Users]
+      summary: Deactivate an account (SuperAdministrator)
+      description: |
+        Sets `users.deactivated = true` (idempotent; no body). The account gets
+        `401 Account is deactivated` on its next protected call. The caller cannot target its own
+        uid (`403`): that is `POST /api/users/me/deactivate`.
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: "The account, `deactivated: true`"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: "`forbidden` — SuperAdministrator role required, or `uid` is the caller's own."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: "`not_found` — no account with that uid."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/users/{uid}/reactivate:
+    post:
+      tags: [Users]
+      summary: Reactivate an account (SuperAdministrator)
+      description: Sets `users.deactivated = false` (idempotent; no body) and answers the account.
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: "The account, `deactivated: false`"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: "`forbidden` — SuperAdministrator role required."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: "`not_found` — no account with that uid."
           content:
             application/json:
               schema:

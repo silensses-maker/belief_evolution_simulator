@@ -9,5 +9,10 @@ case class AuthenticatedUser(
     dbUserId: Int
 ) {
     def hasRole(role: String): Boolean = roles.contains(role)
-    def isAdmin: Boolean = hasRole("Administrator")
+
+    /** The only role that manages other accounts (roles, deactivation): see [[Roles]]. */
+    def isSuperAdmin: Boolean = hasRole(Roles.SuperAdministrator)
+
+    /** Administrator abilities (persistent frames, every run, other users' info); a SuperAdministrator has them all. */
+    def isAdmin: Boolean = hasRole(Roles.Administrator) || isSuperAdmin
 }
